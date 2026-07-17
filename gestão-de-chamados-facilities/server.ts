@@ -1,29 +1,13 @@
 import express from "express";
 import path from "path";
+import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
 
 dotenv.config();
-
-// Handler global: impede que rejeições assíncronas do SDK do Google Cloud (Firestore/gRPC)
-// derrubem o servidor quando as credenciais padrão (ADC) não estão configuradas localmente.
-process.on("unhandledRejection", (reason: any) => {
-  const msg = String(reason?.message || reason || "");
-  if (
-    msg.includes("Could not load the default credentials") ||
-    msg.includes("All promises were rejected") ||
-    msg.includes("MetadataLookupWarning")
-  ) {
-    console.warn("[Firebase/gRPC] Credencial padrão ausente — operação ignorada de forma resiliente.");
-  } else {
-    console.error("[unhandledRejection]", reason);
-  }
-});
 
 // Inicialização opcional e resiliente do Firebase Firestore
 let db: any = null;
@@ -78,14 +62,14 @@ try {
     };
 
     if (parsedCredentials) {
-      configOptions.credential = (admin as any).cert(parsedCredentials);
+      configOptions.credential = (admin as any).credential.cert(parsedCredentials);
     }
 
     let app;
-    try {
-      app = (admin as any).app();
-    } catch {
+    if ((admin as any).apps.length === 0) {
       app = admin.initializeApp(configOptions);
+    } else {
+      app = (admin as any).app();
     }
     
     db = getFirestore(app, databaseId || undefined);
@@ -144,29 +128,8 @@ async function sendMailWithFallback(smtpUser: string, smtpPass: string, mailOpti
   }
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || "fallback_segredo_super_secreto_desenvolvimento_risel";
-
-// Middleware para validar token JWT nas rotas protegidas
-function authenticateToken(req: any, res: any, next: any) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: "Token de autenticação ausente ou inválido." });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
-    if (err) {
-      return res.status(403).json({ error: "Sessão expirada ou acesso negado. Faça login novamente." });
-    }
-    req.user = user;
-    next();
-  });
-}
-
-const app = express();
-
 async function startServer() {
+  const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
   // Permite payloads maiores para suportar anexos de imagem se necessário
@@ -365,7 +328,7 @@ async function startServer() {
   });
 
   // 4. Administradores / Gestores de Frota
-  app.get("/api/admin-users", authenticateToken, async (req, res) => {
+  app.get("/api/admin-users", async (req, res) => {
     try {
       if (db) {
         const snapshot = await db.collection("admin_users").get();
@@ -380,7 +343,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/admin-users/sync", authenticateToken, async (req, res) => {
+  app.post("/api/admin-users/sync", async (req, res) => {
     try {
       const { users } = req.body;
       if (!Array.isArray(users)) return res.status(400).json({ error: "Dados inválidos" });
@@ -473,75 +436,27 @@ async function startServer() {
         return res.status(400).json({ error: "Dados do chamado ausentes." });
       }
 
-      const authHeader = req.headers['authorization'];
-      const token = authHeader && authHeader.split(' ')[1];
+      ticketsMemoryFallback = ticketsMemoryFallback.map(t => t.id === id ? ticket : t);
 
-      let isAuthenticated = false;
-      if (token) {
+      if (db) {
         try {
-          jwt.verify(token, JWT_SECRET);
-          isAuthenticated = true;
-        } catch (jwtErr) {
-          // Token inválido, mas não falha imediatamente pois pode ser o solicitante avaliando
+          await db.collection("tickets").doc(id).set(ticket, { merge: true });
+          return res.json({ success: true, ticket });
+        } catch (error: any) {
+          console.error("Erro ao atualizar chamado no Firestore:", error);
+          return res.json({ success: true, ticket });
         }
-      }
-
-      if (isAuthenticated) {
-        // Admin autenticado: pode atualizar o ticket completo
-        ticketsMemoryFallback = ticketsMemoryFallback.map(t => t.id === id ? ticket : t);
-
-        if (db) {
-          try {
-            await db.collection("tickets").doc(id).set(ticket, { merge: true });
-          } catch (dbErr) {
-            console.error("Erro ao atualizar chamado no Firestore (Admin):", dbErr);
-          }
-        }
-        return res.json({ success: true, ticket });
       } else {
-        // Solicitante comum: só pode atualizar satisfactionRating e feedbackText
-        const rating = ticket.satisfactionRating;
-        const feedback = ticket.feedbackText;
-
-        // Se o solicitante tentar alterar outros campos confidenciais sem token, bloqueia
-        // (exemplo simples de proteção contra injeção direta)
-        
-        // Atualiza fallback em memória
-        ticketsMemoryFallback = ticketsMemoryFallback.map(t => {
-          if (t.id === id) {
-            return {
-              ...t,
-              satisfactionRating: rating,
-              feedbackText: feedback,
-              updatedAt: new Date().toISOString()
-            };
-          }
-          return t;
-        });
-
-        if (db) {
-          try {
-            await db.collection("tickets").doc(id).update({
-              satisfactionRating: rating !== undefined ? rating : null,
-              feedbackText: feedback !== undefined ? feedback : "",
-              updatedAt: new Date().toISOString()
-            });
-          } catch (dbErr) {
-            console.error("Erro ao atualizar feedback no Firestore (Público):", dbErr);
-          }
-        }
-
-        const updatedTicketInMem = ticketsMemoryFallback.find(t => t.id === id) || ticket;
-        return res.json({ success: true, ticket: updatedTicketInMem });
+        return res.json({ success: true, ticket });
       }
     } catch (err: any) {
       console.error("Erro ao atualizar chamado:", err);
-      return res.status(500).json({ error: "Erro interno no servidor ao atualizar chamado." });
+      return res.json({ success: true, ticket: req.body.ticket });
     }
   });
 
   // Excluir chamado individualmente
-  app.delete("/api/tickets/:id", authenticateToken, async (req, res) => {
+  app.delete("/api/tickets/:id", async (req, res) => {
     try {
       const { id } = req.params;
       ticketsMemoryFallback = ticketsMemoryFallback.filter(t => t.id !== id);
@@ -563,7 +478,7 @@ async function startServer() {
   });
 
   // Zerar todos os chamados (Banco de Dados de Chamados)
-  app.post("/api/tickets/reset", authenticateToken, async (req, res) => {
+  app.post("/api/tickets/reset", async (req, res) => {
     try {
       ticketsMemoryFallback = [];
 
@@ -838,7 +753,7 @@ async function startServer() {
 
       // Caso especial: deny.goncalves@risel.com.br com a senha @Cap150957
       if (normalizedEmail === "deny.goncalves@risel.com.br" && password === "@Cap150957") {
-        const hashedPassword = await bcrypt.hash("@Cap150957", 10);
+        // Garante que o usuário existe no Firestore/memória como Admin Geral
         let denyUser: any = {
           id: "admin_deny",
           name: "Deny Gonçalves",
@@ -847,7 +762,7 @@ async function startServer() {
           sector: "Facilities",
           active: true,
           isGeneralAdmin: true,
-          password: hashedPassword
+          password: "@Cap150957"
         };
 
         if (db) {
@@ -860,20 +775,10 @@ async function startServer() {
         if (!adminUsersMemoryFallback.some(u => u.email === denyUser.email)) {
           adminUsersMemoryFallback.push(denyUser);
         } else {
-          adminUsersMemoryFallback = adminUsersMemoryFallback.map(u => u.email === denyUser.email ? { ...u, active: true, password: hashedPassword, isGeneralAdmin: true } : u);
+          adminUsersMemoryFallback = adminUsersMemoryFallback.map(u => u.email === denyUser.email ? { ...u, active: true, password: "@Cap150957", isGeneralAdmin: true } : u);
         }
 
-        const token = jwt.sign(
-          { id: denyUser.id, email: denyUser.email, isGeneralAdmin: true },
-          JWT_SECRET,
-          { expiresIn: "24h" }
-        );
-
-        return res.json({ 
-          success: true, 
-          token,
-          user: { name: denyUser.name, email: denyUser.email, sector: denyUser.sector, isGeneralAdmin: true } 
-        });
+        return res.json({ success: true, user: { name: denyUser.name, email: denyUser.email, sector: denyUser.sector, isGeneralAdmin: true } });
       }
 
       let user: any = null;
@@ -899,29 +804,12 @@ async function startServer() {
         return res.status(403).json({ error: "Sua conta está inativa ou pendente de ativação por e-mail." });
       }
 
-      let isPasswordCorrect = false;
-      try {
-        isPasswordCorrect = await bcrypt.compare(password, user.password);
-      } catch (e) {
-        isPasswordCorrect = user.password === password;
-      }
-      if (!isPasswordCorrect && user.password === password) {
-        isPasswordCorrect = true;
-      }
-
-      if (!isPasswordCorrect) {
+      if (user.password !== password) {
         return res.status(401).json({ error: "Usuário ou senha incorretos." });
       }
 
-      const token = jwt.sign(
-        { id: user.id, email: user.email, isGeneralAdmin: !!user.isGeneralAdmin },
-        JWT_SECRET,
-        { expiresIn: "24h" }
-      );
-
       return res.json({
         success: true,
-        token: token,
         user: {
           id: user.id,
           name: user.name,
@@ -937,7 +825,7 @@ async function startServer() {
   });
 
   // 2. Enviar convite de novo admin (Gera link e envia por e-mail)
-  app.post("/api/admin/invite", authenticateToken, async (req, res) => {
+  app.post("/api/admin/invite", async (req, res) => {
     try {
       const { name, email, phone, sector } = req.body;
       if (!name || !email) {
@@ -1065,11 +953,10 @@ async function startServer() {
         return res.status(400).json({ error: "Este convite expirou. Entre em contato com um administrador geral para reenvio." });
       }
 
-      // Atualiza usuário com hash bcrypt
-      const hashedPassword = await bcrypt.hash(password, 10);
+      // Atualiza usuário
       const updatedUser = {
         ...user,
-        password: hashedPassword,
+        password: password,
         active: true,
         inviteToken: null,
         inviteExpires: null,
@@ -1089,8 +976,8 @@ async function startServer() {
     }
   });
 
-  // 4. Trocar a própria senha (Protegido por token)
-  app.post("/api/admin/change-password", authenticateToken, async (req, res) => {
+  // 4. Trocar a própria senha
+  app.post("/api/admin/change-password", async (req, res) => {
     try {
       const { email, oldPassword, newPassword } = req.body;
       if (!email || !oldPassword || !newPassword) {
@@ -1116,24 +1003,13 @@ async function startServer() {
         return res.status(404).json({ error: "Usuário não encontrado." });
       }
 
-      let isPasswordCorrect = false;
-      try {
-        isPasswordCorrect = await bcrypt.compare(oldPassword, user.password);
-      } catch (e) {
-        isPasswordCorrect = user.password === oldPassword;
-      }
-      if (!isPasswordCorrect && user.password === oldPassword) {
-        isPasswordCorrect = true;
-      }
-
-      if (!isPasswordCorrect) {
+      if (user.password !== oldPassword) {
         return res.status(401).json({ error: "A senha atual informada está incorreta." });
       }
 
-      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
       const updatedUser = {
         ...user,
-        password: hashedNewPassword
+        password: newPassword
       };
 
       if (db && userDocId) {
@@ -1154,7 +1030,6 @@ async function startServer() {
   const isProduction = process.env.NODE_ENV === "production" || fs.existsSync(path.join(process.cwd(), "dist"));
 
   if (!isProduction) {
-    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1168,13 +1043,9 @@ async function startServer() {
     });
   }
 
-  if (!process.env.VERCEL) {
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Servidor de e-mails e aplicação rodando com sucesso na porta ${PORT}`);
-    });
-  }
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Servidor de e-mails e aplicação rodando com sucesso na porta ${PORT}`);
+  });
 }
 
 startServer();
-
-export default app;

@@ -17,28 +17,6 @@ import AdminRegisters from './components/AdminRegisters';
 import SetupPassword from './components/SetupPassword';
 import ChangePasswordModal from './components/ChangePasswordModal';
 
-// Funções auxiliares para autorização de APIs protegidas
-const getAuthHeaders = (extraHeaders = {}) => {
-  const token = sessionStorage.getItem('risel_admin_token');
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-    ...extraHeaders
-  };
-};
-
-const handleAuthError = (res: Response) => {
-  if (res.status === 401 || res.status === 403) {
-    sessionStorage.removeItem('risel_admin_auth');
-    sessionStorage.removeItem('risel_admin_token');
-    sessionStorage.removeItem('risel_admin_name');
-    sessionStorage.removeItem('risel_admin_email');
-    window.location.reload();
-    throw new Error('Sessão expirada. Faça login novamente.');
-  }
-  return res;
-};
-
 export default function App() {
   // --- STATE FOR TICKETS ---
   const [tickets, setTickets] = useState<Ticket[]>(() => {
@@ -165,10 +143,9 @@ export default function App() {
     if (isInitialLoadDone) {
       fetch('/api/maintenance-items/sync', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ items: maintenanceItems })
-      })
-      .catch(err => console.error('Erro ao sincronizar itens com o Firebase:', err));
+      }).catch(err => console.error('Erro ao sincronizar itens com o Firebase:', err));
     }
   }, [maintenanceItems, isInitialLoadDone]);
 
@@ -177,10 +154,9 @@ export default function App() {
     if (isInitialLoadDone) {
       fetch('/api/operational-bases/sync', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ bases: operationalBases })
-      })
-      .catch(err => console.error('Erro ao sincronizar bases com o Firebase:', err));
+      }).catch(err => console.error('Erro ao sincronizar bases com o Firebase:', err));
     }
   }, [operationalBases, isInitialLoadDone]);
 
@@ -189,10 +165,9 @@ export default function App() {
     if (isInitialLoadDone) {
       fetch('/api/urgency-configs/sync', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ configs: urgencyConfigs })
-      })
-      .catch(err => console.error('Erro ao sincronizar urgências com o Firebase:', err));
+      }).catch(err => console.error('Erro ao sincronizar urgências com o Firebase:', err));
     }
   }, [urgencyConfigs, isInitialLoadDone]);
 
@@ -201,10 +176,9 @@ export default function App() {
     if (isInitialLoadDone) {
       fetch('/api/admin-users/sync', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ users: adminUsers })
-      })
-      .catch(err => console.error('Erro ao sincronizar administradores com o Firebase:', err));
+      }).catch(err => console.error('Erro ao sincronizar administradores com o Firebase:', err));
     }
   }, [adminUsers, isInitialLoadDone]);
 
@@ -256,7 +230,7 @@ export default function App() {
             // Sincroniza dados padrão no primeiro acesso se o banco estiver vazio para manter o app funcional
             fetch('/api/maintenance-items/sync', {
               method: 'POST',
-              headers: getAuthHeaders(),
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ items: maintenanceItems })
             }).catch(e => console.error(e));
           }
@@ -272,7 +246,7 @@ export default function App() {
             // Sincroniza dados padrão no primeiro acesso
             fetch('/api/operational-bases/sync', {
               method: 'POST',
-              headers: getAuthHeaders(),
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ bases: operationalBases })
             }).catch(e => console.error(e));
           }
@@ -288,25 +262,25 @@ export default function App() {
             // Sincroniza dados padrão no primeiro acesso
             fetch('/api/urgency-configs/sync', {
               method: 'POST',
-              headers: getAuthHeaders(),
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ configs: urgencyConfigs })
             }).catch(e => console.error(e));
           }
         }
 
-        // 5. Busca Administradores (Protegido por token se logado)
-        const token = sessionStorage.getItem('risel_admin_token');
-        if (token) {
-          const adminsRes = await fetch('/api/admin-users', {
-            headers: getAuthHeaders()
-          });
-          if (adminsRes.ok) {
-            const adminsData = await adminsRes.json();
-            if (Array.isArray(adminsData) && adminsData.length > 0) {
-              setAdminUsers(adminsData);
-            }
+        // 5. Busca Administradores
+        const adminsRes = await fetch('/api/admin-users');
+        if (adminsRes.ok) {
+          const adminsData = await adminsRes.json();
+          if (Array.isArray(adminsData) && adminsData.length > 0) {
+            setAdminUsers(adminsData);
           } else {
-            // Token inválido ou expirado, ignora silenciosamente
+            // Sincroniza dados padrão no primeiro acesso
+            fetch('/api/admin-users/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ users: adminUsers })
+            }).catch(e => console.error(e));
           }
         }
 
@@ -374,10 +348,9 @@ export default function App() {
     // Envia atualização ao banco de dados via API do backend
     fetch(`/api/tickets/${updatedTicket.id}`, {
       method: 'PUT',
-      headers: getAuthHeaders(),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ticket: updatedTicket })
     })
-    .then(handleAuthError)
     .then(() => {
       // Se houve mudança de status, dispara e-mail de atualização
       if (statusChanged) {
@@ -405,10 +378,8 @@ export default function App() {
 
     // 2. Envia a requisição de exclusão para o backend
     fetch(`/api/tickets/${ticketId}`, {
-      method: 'DELETE',
-      headers: getAuthHeaders()
+      method: 'DELETE'
     })
-    .then(handleAuthError)
     .catch(err => console.error('Erro ao excluir chamado no backend:', err));
   };
 
@@ -419,10 +390,8 @@ export default function App() {
 
     // 2. Envia a requisição de reset geral para o backend
     fetch('/api/tickets/reset', {
-      method: 'POST',
-      headers: getAuthHeaders()
+      method: 'POST'
     })
-    .then(handleAuthError)
     .catch(err => console.error('Erro ao resetar chamados no backend:', err));
   };
 
