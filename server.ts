@@ -126,10 +126,11 @@ async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOp
 
   if (mailOptions.cc) {
     if (typeof mailOptions.cc === "string" && mailOptions.cc.trim()) {
-      msg.cc = mailOptions.cc.split(",").map((e: string) => e.trim()).filter(Boolean);
+      msg.cc = mailOptions.cc.split(",").map((e: string) => e.trim()).filter((e: string) => e && e !== fromEmail && e !== mailOptions.to);
     } else if (Array.isArray(mailOptions.cc)) {
-      msg.cc = mailOptions.cc;
+      msg.cc = mailOptions.cc.filter((e: string) => e && e !== fromEmail && e !== mailOptions.to);
     }
+    if (msg.cc && msg.cc.length === 0) delete msg.cc;
   }
 
   if (mailOptions.attachments && mailOptions.attachments.length > 0) {
@@ -783,8 +784,9 @@ async function startServer() {
       await sendMailWithFallback(smtpUser, smtpPass, mailOptions);
       res.json({ success: true, message: "E-mail de notificação enviado com sucesso!" });
     } catch (error: any) {
-      console.error("Erro ao enviar e-mail via SMTP Gmail:", error);
-      res.status(500).json({ error: "Falha ao enviar e-mail de notificação: " + error.message });
+      console.error("Erro ao enviar e-mail de notificação:", error);
+      const sgDetail = error.response?.body?.errors?.map((e: any) => e.message).join("; ") || error.message;
+      res.status(500).json({ error: "Falha ao enviar e-mail de notificação: " + sgDetail });
     }
   });
 
