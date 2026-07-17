@@ -112,6 +112,7 @@ async function sendMailWithFallback(smtpUser: string, smtpPass: string, mailOpti
       host: "smtp.gmail.com",
       port: port,
       secure: secure,
+      family: 4,
       auth: {
         user: smtpUser,
         pass: smtpPass,
@@ -119,7 +120,7 @@ async function sendMailWithFallback(smtpUser: string, smtpPass: string, mailOpti
       tls: {
         rejectUnauthorized: false
       },
-      connectionTimeout: 8000, // 8 segundos de timeout para cada tentativa
+      connectionTimeout: 10000,
     });
   };
 
