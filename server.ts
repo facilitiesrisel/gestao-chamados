@@ -116,10 +116,11 @@ async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOp
 
   const fromRaw = mailOptions.from || "facilitiesrisel@gmail.com";
   const fromEmail = fromRaw.includes("<") ? fromRaw.replace(/.*<(.+?)>.*/, "$1") : fromRaw;
+  const fromName = fromRaw.includes("<") ? fromRaw.replace(/"?(.+?)"?\s*<.*/, "$1") : "Facilities Risel";
 
   const msg: any = {
     to: mailOptions.to,
-    from: fromEmail,
+    from: { email: fromEmail, name: fromName },
     subject: mailOptions.subject,
     html: mailOptions.html,
   };
@@ -482,6 +483,9 @@ async function startServer() {
         return res.status(400).json({ error: "Dados do chamado ausentes." });
       }
 
+      const smtpUserLocal = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
+      const smtpPassLocal = process.env.SMTP_PASS || "@Cap150957";
+
       const authHeader = req.headers['authorization'];
       const token = authHeader && authHeader.split(' ')[1];
 
@@ -496,8 +500,20 @@ async function startServer() {
       }
 
       if (isAuthenticated) {
+        // Busca o ticket anterior para detectar mudança de status
+        let previousTicket: any = null;
+        if (db) {
+          try {
+            const prevDoc = await db.collection("tickets").doc(id).get();
+            if (prevDoc.exists) previousTicket = { id: prevDoc.id, ...prevDoc.data() };
+          } catch (e) { /* ignore */ }
+        }
+        if (!previousTicket) {
+          previousTicket = ticketsMemoryFallback.find((t: any) => t.id === id) || null;
+        }
+
         // Admin autenticado: pode atualizar o ticket completo
-        ticketsMemoryFallback = ticketsMemoryFallback.map(t => t.id === id ? ticket : t);
+        ticketsMemoryFallback = ticketsMemoryFallback.map((t: any) => t.id === id ? ticket : t);
 
         if (db) {
           try {
@@ -506,6 +522,60 @@ async function startServer() {
             console.error("Erro ao atualizar chamado no Firestore (Admin):", dbErr);
           }
         }
+
+        // Envia e-mail se o status mudou
+        const statusChanged = previousTicket && previousTicket.status !== ticket.status;
+        if (statusChanged) {
+          const notifyStatusChange = async () => {
+            try {
+              const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
+              const statusHtml = `
+                <!DOCTYPE html>
+                <html lang="pt-BR">
+                <head><meta charset="UTF-8"></head>
+                <body style="margin:0;padding:0;background-color:#f1f5f9;">
+                <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
+                  <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
+                    <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
+                    <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">ATUALIZAÇÃO DE STATUS</p>
+                  </div>
+                  <div style="padding: 28px; color: #334155;">
+                    <p style="font-size:15px;">Olá, <strong>${ticket.requesterName || "Solicitante"}</strong>,</p>
+                    <p style="font-size:14px;color:#475569;">O status do seu chamado foi atualizado:</p>
+                    <div style="background:#f0fdf4;border-left:4px solid #247d52;padding:16px;border-radius:8px;margin:16px 0;">
+                      <p style="margin:0;font-size:13px;color:#15803d;">
+                        <strong>De:</strong> ${previousTicket.status || "—"}<br>
+                        <strong>Para:</strong> ${ticket.status}
+                      </p>
+                    </div>
+                    ${ticket.technicalNotes ? `
+                    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:20px;margin:16px 0;">
+                      <h3 style="margin:0 0 8px 0;color:#1e40af;font-size:13px;">Notas Técnicas</h3>
+                      <p style="margin:0;font-size:13px;color:#1e3a5f;white-space:pre-wrap;">${ticket.technicalNotes}</p>
+                    </div>
+                    ` : ""}
+                    <div style="text-align:center;margin:20px 0;">
+                      <a href="${publicUrl}" style="display:inline-block;background-color:#247d52;color:#ffffff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;">Acessar Chamado ${ticket.id}</a>
+                    </div>
+                  </div>
+                </div>
+                </body>
+                </html>
+              `;
+              await sendMailWithFallback(smtpUserLocal, smtpPassLocal, {
+                to: ticket.requesterEmail || ticket.email,
+                from: `"Facilities Risel" <${smtpUserLocal}>`,
+                subject: `[Facilities] Status atualizado — Chamado ${ticket.id}`,
+                html: statusHtml,
+              });
+              console.log(`E-mail de mudança de status enviado para ${ticket.requesterEmail || ticket.email} (chamado ${ticket.id}).`);
+            } catch (emailErr) {
+              console.error("Erro ao enviar e-mail de mudança de status:", emailErr);
+            }
+          };
+          notifyStatusChange();
+        }
+
         return res.json({ success: true, ticket });
       } else {
         // Solicitante comum: só pode atualizar satisfactionRating e feedbackText
@@ -596,6 +666,170 @@ async function startServer() {
     }
   });
 
+  // --- ROTAS PÚBLICAS (sem autenticação) ---
+
+  // Acesso público a um chamado por ID (sem login)
+  app.get("/api/tickets/public/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      let ticket = null;
+
+      if (db) {
+        try {
+          const doc = await db.collection("tickets").doc(id).get();
+          if (doc.exists) {
+            ticket = { id: doc.id, ...doc.data() };
+          }
+        } catch (e) {
+          console.error("Erro Firestore (public get ticket):", e);
+        }
+      }
+
+      if (!ticket) {
+        ticket = ticketsMemoryFallback.find(t => t.id === id) || null;
+      }
+
+      if (!ticket) {
+        return res.status(404).json({ error: "Chamado não encontrado." });
+      }
+
+      // Remove campos sensíveis antes de enviar
+      const { photos, feedbackPhoto, ...safeTicket } = ticket as any;
+      return res.json({ ticket: safeTicket });
+    } catch (err: any) {
+      console.error("Erro ao buscar chamado público:", err);
+      return res.status(500).json({ error: "Erro no servidor." });
+    }
+  });
+
+  // Comentário/observação pública do solicitante (sem login)
+  app.post("/api/tickets/public/:id/comment", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { comment, photo } = req.body;
+
+      if (!comment || !comment.trim()) {
+        return res.status(400).json({ error: "Comentário é obrigatório." });
+      }
+
+      const smtpUserPub = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
+      const smtpPassPub = process.env.SMTP_PASS || "@Cap150957";
+
+      let ticket = null;
+
+      if (db) {
+        try {
+          const doc = await db.collection("tickets").doc(id).get();
+          if (doc.exists) {
+            ticket = { id: doc.id, ...doc.data() };
+          }
+        } catch (e) {
+          console.error("Erro Firestore (public comment):", e);
+        }
+      }
+
+      if (!ticket) {
+        ticket = ticketsMemoryFallback.find(t => t.id === id) || null;
+      }
+
+      if (!ticket) {
+        return res.status(404).json({ error: "Chamado não encontrado." });
+      }
+
+      // Atualiza o chamado com a observação do solicitante
+      const now = new Date().toISOString();
+      const updateData: any = {
+        requesterComment: comment.trim(),
+        requesterCommentAt: now,
+      };
+      if (photo) {
+        updateData.requesterPhoto = photo;
+      }
+
+      if (db) {
+        try {
+          await db.collection("tickets").doc(id).update(updateData);
+        } catch (e) {
+          console.error("Erro Firestore (public comment update):", e);
+          return res.status(500).json({ error: "Erro ao salvar comentário." });
+        }
+      }
+
+      const idx = ticketsMemoryFallback.findIndex(t => t.id === id);
+      if (idx !== -1) {
+        ticketsMemoryFallback[idx] = { ...ticketsMemoryFallback[idx], ...updateData };
+      }
+
+      // Envia e-mail de notificação aos admins sobre nova interação do solicitante
+      const notifyAdminsAboutComment = async () => {
+        try {
+          const commentHtml = `
+            <!DOCTYPE html>
+            <html lang="pt-BR">
+            <head><meta charset="UTF-8"></head>
+            <body style="margin:0;padding:0;background-color:#f1f5f9;">
+            <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
+              <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
+                <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
+                <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">NOVA INTERAÇÃO DO SOLICITANTE</p>
+              </div>
+              <div style="padding: 28px; color: #334155;">
+                <p>O solicitante do chamado <strong>${id}</strong> adicionou uma nova observação:</p>
+                <div style="background:#f8fafc;border:1px solid #f1f5f9;border-radius:12px;padding:20px;margin:16px 0;">
+                  <p style="margin:0;color:#334155;font-style:italic;white-space:pre-wrap;">${comment.trim()}</p>
+                </div>
+                <p style="font-size:13px;color:#64748b;">Acesse o painel para responder.</p>
+              </div>
+            </div>
+            </body>
+            </html>
+          `;
+
+          await sendMailWithFallback(smtpUserPub, smtpPassPub, {
+            to: "deny.goncalves@risel.com.br",
+            from: `"Facilities Risel" <${smtpUserPub}>`,
+            subject: `[Facilities] Nova interação do solicitante — Chamado ${id}`,
+            html: commentHtml,
+          });
+
+          let adminEmails: string[] = [];
+          if (db) {
+            const snap = await db.collection("admin_users").where("active", "==", true).get();
+            snap.docs.forEach((d: any) => {
+              const e = d.data().email?.trim();
+              if (e && e !== smtpUserPub) adminEmails.push(e);
+            });
+          }
+          if (adminEmails.length === 0) {
+            adminEmails = adminUsersMemoryFallback
+              .filter(u => u.active && u.email)
+              .map(u => u.email.trim());
+          }
+
+          for (const adminEmail of adminEmails) {
+            if (adminEmail === "deny.goncalves@risel.com.br") continue;
+            await sendMailWithFallback(smtpUserPub, smtpPassPub, {
+              to: adminEmail,
+              from: `"Facilities Risel" <${smtpUserPub}>`,
+              subject: `[Facilities] Nova interação do solicitante — Chamado ${id}`,
+              html: commentHtml,
+            });
+          }
+          console.log(`E-mails de interação do solicitante enviados para admins (chamado ${id}).`);
+        } catch (emailErr) {
+          console.error("Erro ao enviar e-mails de interação do solicitante:", emailErr);
+        }
+      };
+
+      notifyAdminsAboutComment();
+
+      return res.json({ success: true, message: "Observação registrada com sucesso!" });
+    } catch (err: any) {
+      console.error("Erro ao processar comentário público:", err);
+      return res.status(500).json({ error: "Erro no servidor." });
+    }
+  });
+
   // Endpoint da API para envio de e-mails de chamados
   app.post("/api/send-email", async (req, res) => {
     try {
@@ -629,30 +863,35 @@ async function startServer() {
         : `[Risel Facilities] Chamado Registrado com Sucesso: ${ticket.id}`;
 
       // Corpo em HTML bem desenhado e profissional
+      const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
       const htmlContent = `
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+        <!DOCTYPE html>
+        <html lang="pt-BR">
+        <head><meta charset="UTF-8"></head>
+        <body style="margin:0;padding:0;background-color:#f1f5f9;">
+        <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
           <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
             <h1 style="margin: 0; font-size: 22px; font-weight: 800; letter-spacing: 0.5px;">RISEL FACILITIES</h1>
-            <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;">Gestão de Manutenção Predial</p>
+            <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;">Gest&#227;o de Manuten&#231;&#227;o Predial</p>
           </div>
           
           <div style="padding: 28px; color: #334155; line-height: 1.6;">
             ${isUpdate ? `
               <div style="background-color: #f0fdf4; border-left: 4px solid #247d52; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
                 <h3 style="margin: 0 0 6px 0; color: #166534; font-size: 15px; font-weight: 800;">Status do Chamado Atualizado!</h3>
-                <p style="margin: 0; font-size: 13.5px; color: #15803d; font-weight: 500;">${updateMessage || "O status ou informações do seu chamado de facilities foram atualizados."}</p>
+                <p style="margin: 0; font-size: 13.5px; color: #15803d; font-weight: 500;">${updateMessage || "O status ou informa&#231;&#245;es do seu chamado de facilities foram atualizados."}</p>
               </div>
             ` : `
-              <p style="font-size: 15px; margin-top: 0; color: #1e293b;">Olá, <strong>${ticket.requesterName}</strong>,</p>
-              <p style="font-size: 14px; color: #475569;">Confirmamos o registro do seu chamado de manutenção preventiva/corretiva na base da Risel. Uma notificação foi enviada ao time operacional.</p>
+              <p style="font-size: 15px; margin-top: 0; color: #1e293b;">Ol&#225;, <strong>${ticket.requesterName}</strong>,</p>
+              <p style="font-size: 14px; color: #475569;">Confirmamos o registro do seu chamado de manuten&#231;&#227;o preventiva/corretiva na base da Risel. Uma notifica&#231;&#227;o foi enviada ao time operacional.</p>
             `}
 
             <div style="background-color: #f8fafc; border: 1px solid #f1f5f9; border-radius: 12px; padding: 20px; margin: 24px 0;">
-              <h2 style="margin: 0 0 14px 0; font-size: 13px; color: #1e293b; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; text-transform: uppercase; font-weight: 800; letter-spacing: 0.5px;">Especificações da Solicitação</h2>
+              <h2 style="margin: 0 0 14px 0; font-size: 13px; color: #1e293b; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; text-transform: uppercase; font-weight: 800; letter-spacing: 0.5px;">Especifica&#231;&#245;es da Solicita&#231;&#227;o</h2>
               
               <table style="width: 100%; font-size: 13px; border-collapse: collapse;">
                 <tr>
-                  <td style="padding: 8px 0; color: #64748b; font-weight: 600; width: 150px;">Código do Chamado:</td>
+                  <td style="padding: 8px 0; color: #64748b; font-weight: 600; width: 150px;">C&#243;digo do Chamado:</td>
                   <td style="padding: 8px 0; color: #247d52; font-weight: 800; font-family: monospace; font-size: 15px;">${ticket.id}</td>
                 </tr>
                 <tr>
@@ -677,11 +916,11 @@ async function startServer() {
                 </tr>
                 <tr>
                   <td style="padding: 8px 0; color: #64748b; font-weight: 600;">Base Operacional:</td>
-                  <td style="padding: 8px 0; color: #334155; font-weight: 500;">${ticket.operationalBase || "Risel"}</td>
+                  <td style="padding: 8px 0; color: #334155; font-weight: 500;">${ticket.operationalBase || ticket.baseOperacional || "Risel"}</td>
                 </tr>
                 <tr>
                   <td style="padding: 8px 0; color: #64748b; font-weight: 600;">Setor / Local:</td>
-                  <td style="padding: 8px 0; color: #334155; font-weight: 500;">${ticket.location}</td>
+                  <td style="padding: 8px 0; color: #334155; font-weight: 500;">${ticket.location || "-"}</td>
                 </tr>
                 <tr>
                   <td style="padding: 8px 0; color: #64748b; font-weight: 600;">Data de Abertura:</td>
@@ -696,20 +935,40 @@ async function startServer() {
                 </tr>
                 <tr>
                   <td style="padding: 10px; color: #334155; font-style: italic; background-color: #ffffff; border-radius: 8px; border: 1px dashed #cbd5e1; margin-top: 6px;" colspan="2">
-                    ${ticket.description}
+                    ${ticket.description || "Nenhum relato informado."}
                   </td>
                 </tr>
               </table>
             </div>
 
-            <p style="font-size: 13px; color: #64748b; margin-bottom: 24px;">Você pode rastrear a resolução e interagir diretamente por meio do canal de acompanhamento do painel utilizando o seu código.</p>
+            ${ticket.technicalNotes ? `
+            <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 12px; padding: 20px; margin: 24px 0;">
+              <h2 style="margin: 0 0 10px 0; font-size: 13px; color: #1e40af; border-bottom: 2px solid #bfdbfe; padding-bottom: 8px; text-transform: uppercase; font-weight: 800;">Notas T&#233;cnicas / Resolu&#231;&#227;o</h2>
+              <p style="margin: 0; font-size: 13px; color: #1e3a5f; white-space: pre-wrap;">${ticket.technicalNotes}</p>
+            </div>
+            ` : ""}
+
+            ${ticket.feedbackText ? `
+            <div style="background-color: #fefce8; border: 1px solid #fde68a; border-radius: 12px; padding: 20px; margin: 24px 0;">
+              <h2 style="margin: 0 0 10px 0; font-size: 13px; color: #92400e; border-bottom: 2px solid #fde68a; padding-bottom: 8px; text-transform: uppercase; font-weight: 800;">Observa&#231;&#245;es do Solicitante</h2>
+              <p style="margin: 0; font-size: 13px; color: #78350f; white-space: pre-wrap;">${ticket.feedbackText}</p>
+            </div>
+            ` : ""}
+
+            <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px; padding: 16px; margin: 24px 0; text-align: center;">
+              <p style="margin: 0 0 8px 0; font-size: 13px; color: #166534; font-weight: 700;">Acompanhe e interaja com seu chamado:</p>
+              <a href="${publicUrl}" style="display: inline-block; background-color: #247d52; color: #ffffff; padding: 10px 24px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 13px;">Acessar Chamado ${ticket.id}</a>
+              <p style="margin: 6px 0 0 0; font-size: 11px; color: #64748b; word-break: break-all;">${publicUrl}</p>
+            </div>
             
             <div style="text-align: center; border-top: 1px solid #f1f5f9; padding-top: 20px; margin-top: 24px;">
-              <span style="font-size: 11px; color: #94a3b8; display: block; font-weight: 500;">E-mail disparado automaticamente pelo Serviço de Facilities da Risel.</span>
+              <span style="font-size: 11px; color: #94a3b8; display: block; font-weight: 500;">E-mail disparado automaticamente pelo Servi&#231;o de Facilities da Risel.</span>
               <span style="font-size: 11px; color: #94a3b8; display: block; font-weight: 500; margin-top: 2px;">&copy; Risel Facilities. Todos os direitos reservados.</span>
             </div>
           </div>
         </div>
+        </body>
+        </html>
       `;
 
       // Coleta dinâmica de todos os e-mails de administradores ativos

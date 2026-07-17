@@ -16,6 +16,7 @@ import AdminLogin from './components/AdminLogin';
 import AdminRegisters from './components/AdminRegisters';
 import SetupPassword from './components/SetupPassword';
 import ChangePasswordModal from './components/ChangePasswordModal';
+import PublicTicketView from './components/PublicTicketView';
 
 // Funções auxiliares para autorização de APIs protegidas
 const getAuthHeaders = (extraHeaders = {}) => {
@@ -108,11 +109,20 @@ export default function App() {
   // Token de convite por e-mail na URL
   const [inviteToken, setInviteToken] = useState<string | null>(null);
 
+  // Acesso público via URL /chamado/:id
+  const [publicTicketId, setPublicTicketId] = useState<string | null>(null);
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const token = params.get('inviteToken');
     if (token) {
       setInviteToken(token);
+    }
+
+    // Verifica se a URL é /chamado/:id
+    const pathParts = window.location.pathname.split('/').filter(Boolean);
+    if (pathParts.length === 2 && pathParts[0] === 'chamado') {
+      setPublicTicketId(pathParts[1]);
     }
   }, []);
 
@@ -506,7 +516,31 @@ export default function App() {
       />
 
       {/* RENDER PRINCIPAL DO LAYOUT */}
-      {profile === 'admin' && isAdminAuthenticated ? (
+      {publicTicketId ? (
+        /* --- ACESSO PÚBLICO AO CHAMADO (sem login) --- */
+        <div className="flex-1 flex flex-col min-h-screen z-10 relative">
+          <header className="bg-white/80 backdrop-blur-md border-b border-slate-200/60 px-4 sm:px-6 py-4 shrink-0 shadow-sm">
+            <div className="max-w-3xl mx-auto flex items-center gap-3">
+              <img 
+                src="https://i.ibb.co/My6STcDv/71144827-2525571747712417-6231227587708846080-n.jpg" 
+                alt="Risel Facilities" 
+                className="w-8 h-8 rounded-full object-cover border border-slate-300 shrink-0"
+                referrerPolicy="no-referrer"
+              />
+              <div>
+                <h1 className="text-sm font-bold font-display text-slate-800 uppercase tracking-tight">Risel Facilities</h1>
+                <p className="text-[10px] text-slate-400">Acompanhamento Público de Chamado</p>
+              </div>
+            </div>
+          </header>
+          <main className="flex-1 max-w-3xl w-full mx-auto px-4 sm:px-6 py-6">
+            <PublicTicketView ticketId={publicTicketId} />
+          </main>
+          <footer className="text-slate-400 py-4 text-center text-xs bg-white/40 border-t border-slate-100">
+            <p>&copy; {new Date().getFullYear()} Risel Facilities. Todos os direitos reservados.</p>
+          </footer>
+        </div>
+      ) : profile === 'admin' && isAdminAuthenticated ? (
         
         <div className="flex h-screen overflow-hidden z-10 relative">
           

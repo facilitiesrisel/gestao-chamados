@@ -34,8 +34,12 @@ export interface Ticket {
   cost: number;
   assignedTechnician?: string;
   adminNotes?: string;
+  technicalNotes?: string;
   satisfactionRating?: number;
   feedbackText?: string;
+  requesterComment?: string;
+  requesterCommentAt?: string;
+  requesterPhoto?: string;
   isSlaViolated: boolean;
   photos?: string[];
 }
