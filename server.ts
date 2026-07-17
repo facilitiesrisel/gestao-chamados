@@ -954,8 +954,13 @@ async function startServer() {
       // Verifica se o e-mail já existe
       let alreadyExists = false;
       if (db) {
-        const querySnapshot = await db.collection("admin_users").where("email", "==", normalizedEmail).get();
-        alreadyExists = !querySnapshot.empty;
+        try {
+          const querySnapshot = await db.collection("admin_users").where("email", "==", normalizedEmail).get();
+          alreadyExists = !querySnapshot.empty;
+        } catch (dbErr: any) {
+          console.error("[invite] Erro ao buscar admin no Firestore (continuando com fallback):", dbErr.message);
+          alreadyExists = adminUsersMemoryFallback.some(u => u.email.trim().toLowerCase() === normalizedEmail);
+        }
       } else {
         alreadyExists = adminUsersMemoryFallback.some(u => u.email.trim().toLowerCase() === normalizedEmail);
       }
@@ -981,7 +986,11 @@ async function startServer() {
       };
 
       if (db) {
-        await db.collection("admin_users").doc(newAdmin.id).set(newAdmin);
+        try {
+          await db.collection("admin_users").doc(newAdmin.id).set(newAdmin);
+        } catch (dbErr: any) {
+          console.error("[invite] Erro ao salvar admin no Firestore (salvando em memória):", dbErr.message);
+        }
       }
       adminUsersMemoryFallback.push(newAdmin);
 
@@ -1028,8 +1037,14 @@ async function startServer() {
         `
       };
 
-      await sendMailWithFallback(smtpUser, smtpPass, mailOptions);
-      return res.json({ success: true, message: "Convite enviado com sucesso!", user: newAdmin });
+      let emailSent = false;
+      try {
+        await sendMailWithFallback(smtpUser, smtpPass, mailOptions);
+        emailSent = true;
+      } catch (emailErr: any) {
+        console.error("[invite] Erro ao enviar e-mail de convite (convite criado com sucesso):", emailErr.message);
+      }
+      return res.json({ success: true, message: emailSent ? "Convite enviado com sucesso!" : "Convite criado com sucesso, mas o e-mail pôde ser enviado. Compartilhe o link manualmente.", user: newAdmin, activationLink });
     } catch (err: any) {
       console.error("Erro ao enviar convite administrativo:", err);
       return res.status(500).json({ error: "Erro interno no servidor ao processar convite: " + err.message });
