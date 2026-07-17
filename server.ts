@@ -1,12 +1,15 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
+import dns from "dns";
 import nodemailer from "nodemailer";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+
+dns.setDefaultResultOrder("ipv4first");
 
 dotenv.config();
 
