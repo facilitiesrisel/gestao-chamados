@@ -1,15 +1,12 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
-import dns from "dns";
-import nodemailer from "nodemailer";
+import sgMail from "@sendgrid/mail";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-
-dns.setDefaultResultOrder("ipv4first");
 
 dotenv.config();
 
@@ -108,44 +105,49 @@ let operationalBasesMemoryFallback: any[] = [];
 let urgencyConfigsMemoryFallback: any[] = [];
 let adminUsersMemoryFallback: any[] = [];
 
-// Função utilitária resiliente para envio de e-mail com fallback automático de portas (465 SSL para 587 TLS)
-async function sendMailWithFallback(smtpUser: string, smtpPass: string, mailOptions: nodemailer.SendMailOptions) {
-  const createTransporter = (port: number, secure: boolean) => {
-    return nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: port,
-      secure: secure,
-      family: 4,
-      auth: {
-        user: smtpUser,
-        pass: smtpPass,
-      },
-      tls: {
-        rejectUnauthorized: false
-      },
-      connectionTimeout: 10000,
-    });
+// Função de envio de e-mail via SendGrid API HTTP (bypass de bloqueio SMTP do Render)
+async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOptions: { from?: string; to: string | string[]; cc?: string; subject: string; html: string; attachments?: any[] }) {
+  const apiKey = process.env.SENDGRID_API_KEY;
+  if (!apiKey) {
+    throw new Error("SENDGRID_API_KEY não configurada. Cadastre a variável de ambiente no Render.");
+  }
+
+  sgMail.setApiKey(apiKey);
+
+  const msg: any = {
+    to: mailOptions.to,
+    from: mailOptions.from || "facilitiesrisel@gmail.com",
+    subject: mailOptions.subject,
+    html: mailOptions.html,
   };
 
-  try {
-    console.log(`Tentando enviar e-mail via SMTP Gmail na porta 465 (SSL direta) com remetente ${smtpUser}...`);
-    const transporter465 = createTransporter(465, true);
-    const info = await transporter465.sendMail(mailOptions);
-    console.log("E-mail enviado com sucesso via porta 465!");
-    return info;
-  } catch (err465: any) {
-    console.warn("Falha no envio do e-mail pela porta 465 (SSL direta). Erro:", err465.message || err465);
-    console.log("Tentando canal alternativo na porta 587 (STARTTLS/TLS)...");
-    try {
-      const transporter587 = createTransporter(587, false);
-      const info = await transporter587.sendMail(mailOptions);
-      console.log("E-mail enviado com sucesso via porta 587!");
-      return info;
-    } catch (err587: any) {
-      console.error("Falha também no envio pela porta 587 (STARTTLS). Erro:", err587.message || err587);
-      throw new Error(`Ambas as portas de envio de e-mail (465 e 587) falharam.\nErro Porta 465: ${err465.message}\nErro Porta 587: ${err587.message}`);
-    }
+  if (mailOptions.cc) {
+    msg.cc = mailOptions.cc;
   }
+
+  if (mailOptions.attachments && mailOptions.attachments.length > 0) {
+    msg.attachments = mailOptions.attachments.map((att: any) => {
+      if (att.path && att.path.startsWith("http")) {
+        return {
+          content: att.path,
+          filename: att.filename || "anexo",
+          type: att.contentType || "application/octet-stream",
+          disposition: "attachment",
+        };
+      }
+      return {
+        content: att.content || "",
+        filename: att.filename || "anexo",
+        type: att.contentType || "application/octet-stream",
+        disposition: "attachment",
+      };
+    });
+  }
+
+  console.log(`[SendGrid] Enviando e-mail para ${msg.to}...`);
+  const [response] = await sgMail.send(msg);
+  console.log(`[SendGrid] E-mail enviado com sucesso! Status: ${response.statusCode}`);
+  return { messageId: response.headers["x-message-id"] };
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || "fallback_segredo_super_secreto_desenvolvimento_risel";
@@ -784,7 +786,7 @@ async function startServer() {
     }
   });
 
-  // Teste de SMTP de e-mails em tempo real
+  // Teste de envio de e-mail via SendGrid API
   app.post("/api/test-email", async (req, res) => {
     try {
       const { email } = req.body;
@@ -793,7 +795,7 @@ async function startServer() {
       }
 
       const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPass = process.env.SMTP_PASS || "@Cap150957";
+      const smtpPass = process.env.SMTP_PASS || "";
 
       const mailOptions = {
         from: `"Teste Risel" <${smtpUser}>`,
@@ -801,12 +803,12 @@ async function startServer() {
         subject: "[Risel Facilities] E-mail de Teste de Diagnóstico",
         html: `
           <div style="font-family: sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #cbd5e1; border-radius: 12px; padding: 24px; background-color: #f8fafc;">
-            <h2 style="color: #0f172a; margin-top: 0;">✓ Teste de SMTP bem-sucedido!</h2>
-            <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu se autenticar com sucesso no servidor de SMTP do Gmail e enviar esta mensagem.</p>
+            <h2 style="color: #0f172a; margin-top: 0;">✓ Teste de e-mail bem-sucedido!</h2>
+            <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu enviar esta mensagem com sucesso via SendGrid API.</p>
             <div style="margin-top: 20px; padding: 12px; background-color: #f1f5f9; border-radius: 8px; font-size: 12px; color: #475569;">
               <strong>Configuração utilizada:</strong><br>
-              • Usuário SMTP: ${smtpUser}<br>
-              • Porta: Fallback Automático 465 (SSL) / 587 (TLS)
+              • Remetente: ${smtpUser}<br>
+              • Transporte: SendGrid API (HTTPS)
             </div>
           </div>
         `
@@ -815,15 +817,15 @@ async function startServer() {
       await sendMailWithFallback(smtpUser, smtpPass, mailOptions);
       return res.json({ success: true, message: "E-mail enviado com sucesso!" });
     } catch (error: any) {
-      console.error("Erro no teste de SMTP:", error);
-      let advice = "Dica: Verifique se o e-mail e a senha estão corretos.";
-      if (error.message.includes("535") || error.message.toLowerCase().includes("accepted")) {
-        advice = "Dica: O Gmail rejeitou as credenciais. Se você tem Verificação de Duas Etapas ativa, você DEVE gerar uma 'Senha de App' (App Password) de 16 dígitos nas configurações de Segurança da sua conta Google e usá-la no campo SMTP_PASS, em vez da sua senha de login padrão.";
+      console.error("Erro no teste de e-mail:", error);
+      let advice = "Dica: Verifique se a variável SENDGRID_API_KEY está configurada no Render.";
+      if (error.message && error.message.includes("Forbidden")) {
+        advice = "Dica: A API Key do SendGrid não tem permissão. Verifique as permissões da chave em sendgrid.com.";
       }
       return res.status(500).json({ 
         error: error.message, 
         advice,
-        code: error.code || "SMTP_ERROR"
+        code: error.code || "SENDGRID_ERROR"
       });
     }
   });
