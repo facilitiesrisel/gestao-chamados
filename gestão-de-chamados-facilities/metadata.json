@@ -1,6 +1,0 @@
-{
-  "name": "Gestão de Chamados Facilities",
-  "description": "Sistema integrado de abertura, acompanhamento e gestão preditiva de chamados de manutenção para facilities, alinhado com a identidade visual da Risel.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
