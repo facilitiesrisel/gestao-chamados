@@ -114,9 +114,12 @@ async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOp
 
   sgMail.setApiKey(apiKey);
 
+  const fromRaw = mailOptions.from || "facilitiesrisel@gmail.com";
+  const fromEmail = fromRaw.includes("<") ? fromRaw.replace(/.*<(.+?)>.*/, "$1") : fromRaw;
+
   const msg: any = {
     to: mailOptions.to,
-    from: mailOptions.from || "facilitiesrisel@gmail.com",
+    from: fromEmail,
     subject: mailOptions.subject,
     html: mailOptions.html,
   };
