@@ -447,12 +447,76 @@ async function startServer() {
   });
 
 
+  // Gerar próximo ID de chamado (garante unicidade via Firestore)
+  app.get("/api/tickets/next-id", async (req, res) => {
+    try {
+      const year = new Date().getFullYear();
+      let nextSeq = 1;
+
+      if (db) {
+        try {
+          // Usa um documento de controle para gerar o próximo número sequencial
+          const counterRef = db.collection("counters").doc("ticket_counter");
+          const counterDoc = await counterRef.get();
+
+          if (counterDoc.exists) {
+            const data = counterDoc.data();
+            if (data && data.year === year) {
+              nextSeq = (data.lastNumber || 0) + 1;
+            }
+            // Se o ano mudou, reinicia em 1
+          }
+          await counterRef.set({ year, lastNumber: nextSeq });
+        } catch (e) {
+          console.error("Erro ao gerar próximo ID via Firestore:", e);
+          // Fallback: usa timestamp
+          nextSeq = Date.now() % 100000;
+        }
+      } else {
+        nextSeq = ticketsMemoryFallback.length + 1;
+      }
+
+      const sequence = String(nextSeq).padStart(3, '0');
+      const newId = `CHA-${year}-${sequence}`;
+      return res.json({ id: newId });
+    } catch (err: any) {
+      console.error("Erro ao gerar próximo ID:", err);
+      const fallbackId = `CHA-${new Date().getFullYear()}-${Date.now().toString().slice(-3)}`;
+      return res.json({ id: fallbackId });
+    }
+  });
+
   // Cadastrar novo chamado
   app.post("/api/tickets", async (req, res) => {
     try {
       const { ticket } = req.body;
-      if (!ticket || !ticket.id) {
+      if (!ticket) {
         return res.status(400).json({ error: "Dados do chamado inválidos." });
+      }
+
+      // Se não veio ID, gera um no servidor
+      if (!ticket.id) {
+        const year = new Date().getFullYear();
+        let nextSeq = 1;
+        if (db) {
+          try {
+            const counterRef = db.collection("counters").doc("ticket_counter");
+            const counterDoc = await counterRef.get();
+            if (counterDoc.exists) {
+              const data = counterDoc.data();
+              if (data && data.year === year) {
+                nextSeq = (data.lastNumber || 0) + 1;
+              }
+            }
+            await counterRef.set({ year, lastNumber: nextSeq });
+          } catch (e) {
+            console.error("Erro ao gerar ID via Firestore:", e);
+            nextSeq = Date.now() % 100000;
+          }
+        } else {
+          nextSeq = ticketsMemoryFallback.length + 1;
+        }
+        ticket.id = `CHA-${year}-${String(nextSeq).padStart(3, '0')}`;
       }
 
       ticketsMemoryFallback = [ticket, ...ticketsMemoryFallback.filter(t => t.id !== ticket.id)];

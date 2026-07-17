@@ -330,11 +330,57 @@ export default function App() {
     loadAllData();
   }, []);
 
+  // --- REFRESH AUTOMÁTICO DE CHAMADOS (a cada 30 segundos) ---
+  useEffect(() => {
+    if (!isInitialLoadDone) return;
+
+    const refreshTickets = async () => {
+      try {
+        const ticketsRes = await fetch('/api/tickets');
+        if (ticketsRes.ok) {
+          const ticketsData = await ticketsRes.json();
+          if (Array.isArray(ticketsData)) {
+            setTickets(prev => {
+              // Só atualiza se os dados forem diferentes
+              const prevIds = prev.map((t: any) => t.id).sort().join(',');
+              const newIds = ticketsData.map((t: any) => t.id).sort().join(',');
+              if (prevIds !== newIds || JSON.stringify(prev) !== JSON.stringify(ticketsData)) {
+                localStorage.setItem('risel_facilities_tickets', JSON.stringify(ticketsData));
+                return ticketsData;
+              }
+              return prev;
+            });
+          }
+        }
+      } catch (e) {
+        // Ignora erros de rede no refresh silencioso
+      }
+    };
+
+    const intervalId = setInterval(refreshTickets, 30000);
+    return () => clearInterval(intervalId);
+  }, [isInitialLoadDone]);
+
   // --- ACTIONS ---
-  const handleAddTicket = (newTicketData: Omit<Ticket, 'id' | 'createdAt' | 'updatedAt' | 'isSlaViolated'>): string => {
-    const year = new Date().getFullYear();
-    const sequence = String(tickets.length + 1).padStart(3, '0');
-    const newId = `CHA-${year}-${sequence}`;
+  const handleAddTicket = async (newTicketData: Omit<Ticket, 'id' | 'createdAt' | 'updatedAt' | 'isSlaViolated'>): Promise<string> => {
+    // Pede o próximo ID ao servidor (garante unicidade)
+    let newId: string;
+    try {
+      const idRes = await fetch('/api/tickets/next-id');
+      if (idRes.ok) {
+        const idData = await idRes.json();
+        newId = idData.id;
+      } else {
+        // Fallback local
+        const year = new Date().getFullYear();
+        const sequence = String(tickets.length + 1).padStart(3, '0');
+        newId = `CHA-${year}-${sequence}`;
+      }
+    } catch {
+      const year = new Date().getFullYear();
+      const sequence = String(tickets.length + 1).padStart(3, '0');
+      newId = `CHA-${year}-${sequence}`;
+    }
 
     const newTicket: Ticket = {
       ...newTicketData,

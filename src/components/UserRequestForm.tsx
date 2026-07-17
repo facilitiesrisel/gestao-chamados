@@ -10,7 +10,7 @@ import {
 import { Ticket, PriorityType, MaintenanceItem, OperationalBase, UrgencyConfig } from '../types';
 
 interface UserRequestFormProps {
-  onSubmitTicket: (ticket: Omit<Ticket, 'id' | 'createdAt' | 'updatedAt' | 'isSlaViolated'>) => string;
+  onSubmitTicket: (ticket: Omit<Ticket, 'id' | 'createdAt' | 'updatedAt' | 'isSlaViolated'>) => Promise<string> | string;
   maintenanceItems: MaintenanceItem[];
   operationalBases: OperationalBase[];
   urgencyConfigs: UrgencyConfig[];
@@ -134,7 +134,7 @@ export default function UserRequestForm({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
 
@@ -162,7 +162,7 @@ export default function UserRequestForm({
       else if (slaDays <= 7) resolvedPriority = 'Média';
       else resolvedPriority = 'Baixa';
 
-      const ticketId = onSubmitTicket({
+      const ticketId = await onSubmitTicket({
         requesterName,
         requesterEmail,
         requesterPhone,

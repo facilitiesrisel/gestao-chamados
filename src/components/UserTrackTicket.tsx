@@ -32,28 +32,55 @@ export default function UserTrackTicket({ tickets, onRateTicket, initialSearchCo
   const [hoverRating, setHoverRating] = useState<number>(0);
   const [feedbackText, setFeedbackText] = useState('');
   const [ratedSuccessfully, setRatedSuccessfully] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
 
   useEffect(() => {
     if (initialSearchCode) {
       setSearchCode(initialSearchCode);
-      const found = tickets.find(t => t.id.toLowerCase() === initialSearchCode.toLowerCase());
-      if (found) {
-        setSearchedTicket(found);
-      }
-      setHasSearched(true);
+      handleSearchById(initialSearchCode);
     }
-  }, [initialSearchCode, tickets]);
+  }, [initialSearchCode]);
+
+  const handleSearchById = async (code: string) => {
+    if (!code.trim()) return;
+    setIsSearching(true);
+    setHasSearched(true);
+    setRatedSuccessfully(false);
+
+    // Primeiro tenta no array local
+    const foundLocal = tickets.find(t => t.id.trim().toLowerCase() === code.trim().toLowerCase());
+    if (foundLocal) {
+      setSearchedTicket(foundLocal);
+      setRating(foundLocal.satisfactionRating || 0);
+      setFeedbackText(foundLocal.feedbackText || '');
+      setIsSearching(false);
+      return;
+    }
+
+    // Se não encontrou local, busca na API pública
+    try {
+      const res = await fetch(`/api/tickets/public/${encodeURIComponent(code.trim())}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.ticket) {
+          setSearchedTicket(data.ticket as Ticket);
+          setRating(data.ticket.satisfactionRating || 0);
+          setFeedbackText(data.ticket.feedbackText || '');
+          setIsSearching(false);
+          return;
+        }
+      }
+      setSearchedTicket(null);
+    } catch (e) {
+      console.error('Erro ao buscar chamado na API pública:', e);
+      setSearchedTicket(null);
+    }
+    setIsSearching(false);
+  };
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!searchCode.trim()) return;
-
-    const found = tickets.find(t => t.id.trim().toLowerCase() === searchCode.trim().toLowerCase());
-    setSearchedTicket(found || null);
-    setHasSearched(true);
-    setRatedSuccessfully(false);
-    setRating(found?.satisfactionRating || 0);
-    setFeedbackText(found?.feedbackText || '');
+    handleSearchById(searchCode);
   };
 
   const handleRatingSubmit = (e: React.FormEvent) => {
@@ -138,10 +165,12 @@ export default function UserTrackTicket({ tickets, onRateTicket, initialSearchCo
           </div>
             <button
             type="submit"
-            className="bg-risel-blue hover:bg-opacity-95 text-white font-semibold px-6 py-3 rounded-xl transition duration-150 flex items-center gap-2 shadow-sm cursor-pointer"
+            disabled={isSearching}
+            className="bg-risel-blue hover:bg-opacity-95 text-white font-semibold px-6 py-3 rounded-xl transition duration-150 flex items-center gap-2 shadow-sm cursor-pointer disabled:opacity-50"
             id="search-ticket-btn"
           >
-            <span>Buscar</span>
+            {isSearching ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+            <span>{isSearching ? 'Buscando...' : 'Buscar'}</span>
           </button>
         </form>
 
