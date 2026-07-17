@@ -125,7 +125,11 @@ async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOp
   };
 
   if (mailOptions.cc) {
-    msg.cc = mailOptions.cc;
+    if (typeof mailOptions.cc === "string" && mailOptions.cc.trim()) {
+      msg.cc = mailOptions.cc.split(",").map((e: string) => e.trim()).filter(Boolean);
+    } else if (Array.isArray(mailOptions.cc)) {
+      msg.cc = mailOptions.cc;
+    }
   }
 
   if (mailOptions.attachments && mailOptions.attachments.length > 0) {
@@ -138,9 +142,14 @@ async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOp
   }
 
   console.log(`[SendGrid] Enviando e-mail para ${msg.to}...`);
-  const [response] = await sgMail.send(msg);
-  console.log(`[SendGrid] E-mail enviado com sucesso! Status: ${response.statusCode}`);
-  return { messageId: response.headers["x-message-id"] || "enviado" };
+  try {
+    const [response] = await sgMail.send(msg);
+    console.log(`[SendGrid] E-mail enviado com sucesso! Status: ${response.statusCode}`);
+    return { messageId: response.headers["x-message-id"] || "enviado" };
+  } catch (sendErr: any) {
+    console.error("[SendGrid] Erro detalhado:", JSON.stringify(sendErr.response?.body || sendErr.message));
+    throw sendErr;
+  }
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || "fallback_segredo_super_secreto_desenvolvimento_risel";
