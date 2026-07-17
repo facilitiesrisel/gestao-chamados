@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: risel-facilities
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/db-status
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: APP_URL
+        fromService:
+          name: risel-facilities
+          type: web
+          property: url
+      - key: SMTP_USER
+        value: facilitiesrisel@gmail.com
+      - key: SMTP_PASS
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        value: ai-studio-applet-webapp-3f137
+      - key: FIREBASE_DATABASE_ID
+        value: "(default)"
+      - key: FIREBASE_SERVICE_ACCOUNT_KEY
+        sync: false
+      - key: FIREBASE_FIRESTORE_DATABASE_ID
+        value: "(default)"
+      - key: JWT_SECRET
+        generateValue: true
