@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
-import sgMail from "@sendgrid/mail";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
@@ -105,49 +104,59 @@ let operationalBasesMemoryFallback: any[] = [];
 let urgencyConfigsMemoryFallback: any[] = [];
 let adminUsersMemoryFallback: any[] = [];
 
-// Função de envio de e-mail via SendGrid API HTTP (bypass de bloqueio SMTP do Render)
+// Função de envio de e-mail via MailerSend API HTTP (bypass de bloqueio SMTP do Render)
 async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOptions: { from?: string; to: string | string[]; cc?: string; subject: string; html: string; attachments?: any[] }) {
   const apiKey = process.env.SENDGRID_API_KEY;
   if (!apiKey) {
-    throw new Error("SENDGRID_API_KEY não configurada. Cadastre a variável de ambiente no Render.");
+    throw new Error("SENDGRID_API_KEY (MailerSend) não configurada. Cadastre a variável de ambiente no Render.");
   }
 
-  sgMail.setApiKey(apiKey);
+  const recipients = Array.isArray(mailOptions.to)
+    ? mailOptions.to.map((email: string) => ({ email }))
+    : [{ email: mailOptions.to }];
 
-  const msg: any = {
-    to: mailOptions.to,
-    from: mailOptions.from || "facilitiesrisel@gmail.com",
+  const payload: any = {
+    from: { email: mailOptions.from?.replace(/.*<(.+?)>.*/, "$1") || "facilitiesrisel@gmail.com" },
+    to: recipients,
     subject: mailOptions.subject,
     html: mailOptions.html,
   };
 
   if (mailOptions.cc) {
-    msg.cc = mailOptions.cc;
+    const ccEmails = mailOptions.cc.split(",").map((e: string) => e.trim()).filter(Boolean);
+    if (ccEmails.length > 0) {
+      payload.cc = ccEmails.map((email: string) => ({ email }));
+    }
   }
 
   if (mailOptions.attachments && mailOptions.attachments.length > 0) {
-    msg.attachments = mailOptions.attachments.map((att: any) => {
-      if (att.path && att.path.startsWith("http")) {
-        return {
-          content: att.path,
-          filename: att.filename || "anexo",
-          type: att.contentType || "application/octet-stream",
-          disposition: "attachment",
-        };
-      }
-      return {
-        content: att.content || "",
+    payload.attachments = mailOptions.attachments
+      .filter((att: any) => att.content || att.path)
+      .map((att: any) => ({
         filename: att.filename || "anexo",
-        type: att.contentType || "application/octet-stream",
-        disposition: "attachment",
-      };
-    });
+        content: att.content || "",
+      }));
   }
 
-  console.log(`[SendGrid] Enviando e-mail para ${msg.to}...`);
-  const [response] = await sgMail.send(msg);
-  console.log(`[SendGrid] E-mail enviado com sucesso! Status: ${response.statusCode}`);
-  return { messageId: response.headers["x-message-id"] };
+  console.log(`[MailerSend] Enviando e-mail para ${JSON.stringify(recipients)}...`);
+  const response = await fetch("https://api.mailersend.com/v1/email", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`[MailerSend] Erro HTTP ${response.status}:`, errorBody);
+    throw new Error(`MailerSend API erro ${response.status}: ${errorBody}`);
+  }
+
+  const messageId = response.headers.get("x-message-id") || "enviado";
+  console.log(`[MailerSend] E-mail enviado com sucesso! Message-ID: ${messageId}`);
+  return { messageId };
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || "fallback_segredo_super_secreto_desenvolvimento_risel";
@@ -786,7 +795,7 @@ async function startServer() {
     }
   });
 
-  // Teste de envio de e-mail via SendGrid API
+  // Teste de envio de e-mail via MailerSend API
   app.post("/api/test-email", async (req, res) => {
     try {
       const { email } = req.body;
@@ -804,11 +813,11 @@ async function startServer() {
         html: `
           <div style="font-family: sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #cbd5e1; border-radius: 12px; padding: 24px; background-color: #f8fafc;">
             <h2 style="color: #0f172a; margin-top: 0;">✓ Teste de e-mail bem-sucedido!</h2>
-            <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu enviar esta mensagem com sucesso via SendGrid API.</p>
+            <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu enviar esta mensagem com sucesso via MailerSend API.</p>
             <div style="margin-top: 20px; padding: 12px; background-color: #f1f5f9; border-radius: 8px; font-size: 12px; color: #475569;">
               <strong>Configuração utilizada:</strong><br>
               • Remetente: ${smtpUser}<br>
-              • Transporte: SendGrid API (HTTPS)
+              • Transporte: MailerSend API (HTTPS)
             </div>
           </div>
         `
@@ -818,14 +827,14 @@ async function startServer() {
       return res.json({ success: true, message: "E-mail enviado com sucesso!" });
     } catch (error: any) {
       console.error("Erro no teste de e-mail:", error);
-      let advice = "Dica: Verifique se a variável SENDGRID_API_KEY está configurada no Render.";
-      if (error.message && error.message.includes("Forbidden")) {
-        advice = "Dica: A API Key do SendGrid não tem permissão. Verifique as permissões da chave em sendgrid.com.";
+      let advice = "Dica: Verifique se a variável SENDGRID_API_KEY (MailerSend) está configurada no Render.";
+      if (error.message && error.message.includes("401")) {
+        advice = "Dica: A API Key do MailerSend é inválida ou não tem permissão. Verifique em app.mailersend.com → API Tokens.";
       }
       return res.status(500).json({ 
         error: error.message, 
         advice,
-        code: error.code || "SENDGRID_ERROR"
+        code: error.code || "MAILERSEND_ERROR"
       });
     }
   });
