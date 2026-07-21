@@ -961,6 +961,7 @@ async function startServer() {
         return res.status(400).json({ error: "Dados do chamado não informados." });
       }
 
+      console.log(`[send-email] Recebido: ticket=${ticket.id}, isUpdate=${isUpdate}, to=${ticket.requesterEmail}`);
       const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
       const smtpPass = process.env.SMTP_PASS || "@Cap150957";
 

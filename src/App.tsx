@@ -398,20 +398,32 @@ export default function App() {
     });
 
     // Envia para o banco de dados via API do backend
-    fetch('/api/tickets', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ticket: newTicket })
-    })
-    .then(() => {
-      // Envia e-mail de confirmação assincronamente ao criar com sucesso
-      return fetch('/api/send-email', {
+    try {
+      const ticketRes = await fetch('/api/tickets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ticket: newTicket, isUpdate: false })
+        body: JSON.stringify({ ticket: newTicket })
       });
-    })
-    .catch(err => console.error('Erro ao registrar chamado no backend:', err));
+      if (!ticketRes.ok) {
+        console.error('Erro ao registrar chamado no backend:', ticketRes.status, await ticketRes.text());
+      } else {
+        // Envia e-mail de confirmação ao criar com sucesso
+        try {
+          const emailRes = await fetch('/api/send-email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticket: newTicket, isUpdate: false })
+          });
+          if (!emailRes.ok) {
+            console.error('Erro ao enviar e-mail de confirmação:', emailRes.status, await emailRes.text());
+          }
+        } catch (emailErr) {
+          console.error('Falha de rede ao enviar e-mail de confirmação:', emailErr);
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao registrar chamado no backend:', err);
+    }
 
     return newId;
   };
