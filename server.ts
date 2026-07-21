@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import sgMail from "@sendgrid/mail";
+import nodemailer from "nodemailer";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
@@ -105,56 +106,105 @@ let operationalBasesMemoryFallback: any[] = [];
 let urgencyConfigsMemoryFallback: any[] = [];
 let adminUsersMemoryFallback: any[] = [];
 
-// Função de envio de e-mail via SendGrid API HTTP (bypass de bloqueio SMTP do Render)
-async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOptions: { from?: string; to: string | string[]; cc?: string; subject: string; html: string; attachments?: any[] }) {
-  const apiKey = process.env.SENDGRID_API_KEY;
-  if (!apiKey) {
-    throw new Error("SENDGRID_API_KEY não configurada. Cadastre a variável de ambiente no Render.");
-  }
+// Transporter SMTP via nodemailer (fallback quando SendGrid não está configurado)
+let smtpTransporter: nodemailer.Transporter | null = null;
 
-  sgMail.setApiKey(apiKey);
+function getSmtpTransporter(): nodemailer.Transporter {
+  if (!smtpTransporter) {
+    const user = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
+    const pass = process.env.SMTP_PASS || "";
+    if (!pass) {
+      throw new Error("SMTP_PASS não configurada. Cadastre a variável de ambiente SMTP_PASS no Render.");
+    }
+    smtpTransporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user, pass },
+      tls: { rejectUnauthorized: false },
+    });
+    console.log("[SMTP] Transporter Gmail inicializado com sucesso.");
+  }
+  return smtpTransporter;
+}
+
+// Função de envio de e-mail: usa SendGrid API se SENDGRID_API_KEY existir, senão fallback SMTP
+async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOptions: { from?: string; to: string | string[]; cc?: string | string[]; subject: string; html: string; attachments?: any[] }) {
+  const apiKey = process.env.SENDGRID_API_KEY;
 
   const fromRaw = mailOptions.from || "facilitiesrisel@gmail.com";
   const fromEmail = fromRaw.includes("<") ? fromRaw.replace(/.*<(.+?)>.*/, "$1") : fromRaw;
   const fromName = fromRaw.includes("<") ? fromRaw.replace(/"?(.+?)"?\s*<.*/, "$1") : "Facilities Risel";
 
-  const msg: any = {
-    to: mailOptions.to,
-    from: { email: fromEmail, name: fromName },
+  if (apiKey) {
+    // --- SendGrid API (com fallback automático para SMTP) ---
+    try {
+      sgMail.setApiKey(apiKey);
+
+      const msg: any = {
+        to: mailOptions.to,
+        from: { email: fromEmail, name: fromName },
+        subject: mailOptions.subject,
+        html: mailOptions.html,
+      };
+
+      if (mailOptions.cc) {
+        if (typeof mailOptions.cc === "string" && mailOptions.cc.trim()) {
+          msg.cc = mailOptions.cc.split(",").map((e: string) => e.trim()).filter((e: string) => e && e !== fromEmail && e !== mailOptions.to);
+        } else if (Array.isArray(mailOptions.cc)) {
+          msg.cc = mailOptions.cc.filter((e: string) => e && e !== fromEmail && e !== mailOptions.to);
+        }
+        if (msg.cc && msg.cc.length === 0) delete msg.cc;
+      }
+
+      if (mailOptions.attachments && mailOptions.attachments.length > 0) {
+        msg.attachments = mailOptions.attachments.map((att: any) => ({
+          content: att.content || "",
+          filename: att.filename || "anexo",
+          type: att.contentType || "application/octet-stream",
+          disposition: "attachment",
+        }));
+      }
+
+      console.log(`[SendGrid] Enviando e-mail para ${msg.to}...`);
+      const [response] = await sgMail.send(msg);
+      console.log(`[SendGrid] E-mail enviado com sucesso! Status: ${response.statusCode}`);
+      return { messageId: response.headers["x-message-id"] || "enviado" };
+    } catch (sgError: any) {
+      console.warn(`[SendGrid] Falha no envio via SendGrid: ${sgError.message}. Tentando fallback SMTP...`);
+    }
+  }
+
+  // --- Fallback SMTP via Gmail ---
+  const transporter = getSmtpTransporter();
+
+  const toAddress = Array.isArray(mailOptions.to) ? mailOptions.to.join(", ") : mailOptions.to;
+  const ccAddress = mailOptions.cc
+    ? (typeof mailOptions.cc === "string" ? mailOptions.cc : mailOptions.cc.join(", "))
+    : undefined;
+
+  const mailAttachments = (mailOptions.attachments || []).map((att: any) => {
+    if (att.content) {
+      return { filename: att.filename || "anexo", content: att.content, contentType: att.contentType || "application/octet-stream" };
+    }
+    return { filename: att.filename || "anexo.jpg", path: att.path || att };
+  });
+
+  const info = await transporter.sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to: toAddress,
+    cc: ccAddress,
     subject: mailOptions.subject,
     html: mailOptions.html,
-  };
+    attachments: mailAttachments.length > 0 ? mailAttachments : undefined,
+  });
 
-  if (mailOptions.cc) {
-    if (typeof mailOptions.cc === "string" && mailOptions.cc.trim()) {
-      msg.cc = mailOptions.cc.split(",").map((e: string) => e.trim()).filter((e: string) => e && e !== fromEmail && e !== mailOptions.to);
-    } else if (Array.isArray(mailOptions.cc)) {
-      msg.cc = mailOptions.cc.filter((e: string) => e && e !== fromEmail && e !== mailOptions.to);
-    }
-    if (msg.cc && msg.cc.length === 0) delete msg.cc;
-  }
-
-  if (mailOptions.attachments && mailOptions.attachments.length > 0) {
-    msg.attachments = mailOptions.attachments.map((att: any) => ({
-      content: att.content || "",
-      filename: att.filename || "anexo",
-      type: att.contentType || "application/octet-stream",
-      disposition: "attachment",
-    }));
-  }
-
-  console.log(`[SendGrid] Enviando e-mail para ${msg.to}...`);
-  try {
-    const [response] = await sgMail.send(msg);
-    console.log(`[SendGrid] E-mail enviado com sucesso! Status: ${response.statusCode}`);
-    return { messageId: response.headers["x-message-id"] || "enviado" };
-  } catch (sendErr: any) {
-    console.error("[SendGrid] Erro detalhado:", JSON.stringify(sendErr.response?.body || sendErr.message));
-    throw sendErr;
-  }
+  console.log(`[SMTP] E-mail enviado com sucesso! MessageId: ${info.messageId}`);
+  return { messageId: info.messageId };
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || "fallback_segredo_super_secreto_desenvolvimento_risel";
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error("[SEGURANÇA] JWT_SECRET não está configurado! As autenticações podem falhar. Defina a variável de ambiente JWT_SECRET.");
+}
 
 // Middleware para validar token JWT nas rotas protegidas
 function authenticateToken(req: any, res: any, next: any) {
@@ -182,6 +232,15 @@ async function startServer() {
   // Permite payloads maiores para suportar anexos de imagem se necessário
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+  // Headers de segurança
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("X-XSS-Protection", "1; mode=block");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    next();
+  });
 
   // --- ROTAS DO FIREBASE / TICKETS ---
 
@@ -1131,11 +1190,11 @@ async function startServer() {
         html: `
           <div style="font-family: sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #cbd5e1; border-radius: 12px; padding: 24px; background-color: #f8fafc;">
             <h2 style="color: #0f172a; margin-top: 0;">✓ Teste de e-mail bem-sucedido!</h2>
-            <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu enviar esta mensagem com sucesso via SendGrid API.</p>
+            <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu enviar esta mensagem com sucesso.</p>
             <div style="margin-top: 20px; padding: 12px; background-color: #f1f5f9; border-radius: 8px; font-size: 12px; color: #475569;">
               <strong>Configuração utilizada:</strong><br>
               • Remetente: ${smtpUser}<br>
-              • Transporte: SendGrid API (HTTPS)
+              • Transporte: ${process.env.SENDGRID_API_KEY ? 'SendGrid API (HTTPS)' : 'Gmail SMTP (Nodemailer)'}
             </div>
           </div>
         `
@@ -1145,7 +1204,7 @@ async function startServer() {
       return res.json({ success: true, message: "E-mail enviado com sucesso!" });
     } catch (error: any) {
       console.error("Erro no teste de e-mail:", error);
-      let advice = "Dica: Verifique se a variável SENDGRID_API_KEY está configurada no Render.";
+      let advice = "Dica: Verifique se as variáveis SMTP_USER e SMTP_PASS estão configuradas corretamente no Render.";
       if (error.response && error.response.body) {
         const sgErrors = error.response.body.errors || [];
         if (sgErrors.some((e: any) => e.message && e.message.includes("verified"))) {

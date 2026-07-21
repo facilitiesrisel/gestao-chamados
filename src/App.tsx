@@ -434,20 +434,6 @@ export default function App() {
       body: JSON.stringify({ ticket: updatedTicket })
     })
     .then(handleAuthError)
-    .then(() => {
-      // Se houve mudança de status, dispara e-mail de atualização
-      if (statusChanged) {
-        fetch('/api/send-email', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ticket: updatedTicket,
-            isUpdate: true,
-            updateMessage: `O status do seu chamado ${updatedTicket.id} foi atualizado para: "${updatedTicket.status}".`
-          })
-        }).catch(err => console.error('Erro ao enviar e-mail de atualização:', err));
-      }
-    })
     .catch(err => console.error('Erro ao atualizar chamado no backend:', err));
   };
 

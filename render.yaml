@@ -20,6 +20,8 @@ services:
         value: facilitiesrisel@gmail.com
       - key: SMTP_PASS
         sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
       - key: FIREBASE_PROJECT_ID
         value: ai-studio-applet-webapp-3f137
       - key: FIREBASE_DATABASE_ID
