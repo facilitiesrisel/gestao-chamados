@@ -99,12 +99,39 @@ try {
   console.error("Erro ao inicializar Firebase Admin:", err);
 }
 
-// Armazenamento em memória do servidor caso o Firebase não esteja ativo ou falhe
+// Armazenamento em memória persistente do servidor caso o Firebase falhe
 let ticketsMemoryFallback: any[] = [];
 let maintenanceItemsMemoryFallback: any[] = [];
 let operationalBasesMemoryFallback: any[] = [];
 let urgencyConfigsMemoryFallback: any[] = [];
 let adminUsersMemoryFallback: any[] = [];
+
+const localDbPath = path.join(process.cwd(), "local_db.json");
+if (fs.existsSync(localDbPath)) {
+  try {
+    const data = JSON.parse(fs.readFileSync(localDbPath, "utf-8"));
+    if (data.tickets) ticketsMemoryFallback = data.tickets;
+    if (data.maintenanceItems) maintenanceItemsMemoryFallback = data.maintenanceItems;
+    if (data.operationalBases) operationalBasesMemoryFallback = data.operationalBases;
+    if (data.urgencyConfigs) urgencyConfigsMemoryFallback = data.urgencyConfigs;
+    if (data.adminUsers) adminUsersMemoryFallback = data.adminUsers;
+  } catch (e) {
+    console.error("Erro ao ler local_db.json", e);
+  }
+}
+function saveLocalDb() {
+  try {
+    fs.writeFileSync(localDbPath, JSON.stringify({
+      tickets: ticketsMemoryFallback,
+      maintenanceItems: maintenanceItemsMemoryFallback,
+      operationalBases: operationalBasesMemoryFallback,
+      urgencyConfigs: urgencyConfigsMemoryFallback,
+      adminUsers: adminUsersMemoryFallback
+    }, null, 2));
+  } catch (e) {
+    console.error("Erro ao salvar local_db.json", e);
+  }
+}
 
 // Transporter SMTP via nodemailer (fallback quando SendGrid não está configurado)
 let smtpTransporter: nodemailer.Transporter | null = null;
@@ -112,7 +139,7 @@ let smtpTransporter: nodemailer.Transporter | null = null;
 function getSmtpTransporter(): nodemailer.Transporter {
   if (!smtpTransporter) {
     const user = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-    const pass = process.env.SMTP_PASS || "";
+    const pass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
     if (!pass) {
       throw new Error("SMTP_PASS não configurada. Cadastre a variável de ambiente SMTP_PASS no Render.");
     }
@@ -579,6 +606,55 @@ async function startServer() {
       }
 
       ticketsMemoryFallback = [ticket, ...ticketsMemoryFallback.filter(t => t.id !== ticket.id)];
+      saveLocalDb(); // Salva na base de dados local permanentemente
+
+      // Envia e-mail notificando a abertura do novo chamado
+      try {
+        const smtpUserLocal = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
+        const smtpPassLocal = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
+        const emailTo = ticket.requesterEmail || ticket.email;
+        if (emailTo && smtpPassLocal) {
+          const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
+          const newTicketHtml = `
+            <!DOCTYPE html>
+            <html lang="pt-BR">
+            <head><meta charset="UTF-8"></head>
+            <body style="margin:0;padding:0;background-color:#f1f5f9;">
+            <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
+              <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
+                <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
+                <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">CHAMADO ABERTO COM SUCESSO</p>
+              </div>
+              <div style="padding: 28px; color: #334155;">
+                <p style="font-size:15px;">Olá, <strong>${ticket.requesterName || "Solicitante"}</strong>,</p>
+                <p style="font-size:14px;color:#475569;">Seu chamado foi registrado com sucesso e será analisado em breve.</p>
+                <div style="background:#f0fdf4;border-left:4px solid #247d52;padding:16px;border-radius:8px;margin:16px 0;">
+                  <p style="margin:0;font-size:13px;color:#15803d;">
+                    <strong>Protocolo:</strong> ${ticket.id}<br>
+                    <strong>Status:</strong> ${ticket.status}<br>
+                    <strong>Item:</strong> ${ticket.maintenanceItem || ticket.title || "—"}
+                  </p>
+                </div>
+                <div style="text-align:center;margin:20px 0;">
+                  <a href="${publicUrl}" style="display:inline-block;background-color:#247d52;color:#ffffff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;">Acompanhar Chamado</a>
+                </div>
+              </div>
+            </div>
+            </body>
+            </html>
+          `;
+          // Como estamos aguardando a resposta, enviar o e-mail sem travar a requisição
+          sendMailWithFallback(smtpUserLocal, smtpPassLocal, {
+            to: emailTo,
+            from: `"Facilities Risel" <${smtpUserLocal}>`,
+            subject: `[Facilities] Novo Chamado Aberto — ${ticket.id}`,
+            html: newTicketHtml,
+          });
+          console.log(`E-mail de novo chamado enviado para ${emailTo} (chamado ${ticket.id}).`);
+        }
+      } catch (emailErr) {
+        console.error("Erro ao enviar e-mail de novo chamado:", emailErr);
+      }
 
       if (db) {
         try {
@@ -607,7 +683,7 @@ async function startServer() {
       }
 
       const smtpUserLocal = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPassLocal = process.env.SMTP_PASS || "@Cap150957";
+      const smtpPassLocal = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
 
       const authHeader = req.headers['authorization'];
       const token = authHeader && authHeader.split(' ')[1];
@@ -637,6 +713,7 @@ async function startServer() {
 
         // Admin autenticado: pode atualizar o ticket completo
         ticketsMemoryFallback = ticketsMemoryFallback.map((t: any) => t.id === id ? ticket : t);
+        saveLocalDb(); // Salva base local permanentemente
 
         if (db) {
           try {
@@ -720,6 +797,7 @@ async function startServer() {
           }
           return t;
         });
+        saveLocalDb();
 
         if (db) {
           try {
@@ -747,6 +825,7 @@ async function startServer() {
     try {
       const { id } = req.params;
       ticketsMemoryFallback = ticketsMemoryFallback.filter(t => t.id !== id);
+      saveLocalDb();
 
       if (db) {
         try {
@@ -836,7 +915,7 @@ async function startServer() {
       }
 
       const smtpUserPub = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPassPub = process.env.SMTP_PASS || "@Cap150957";
+      const smtpPassPub = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
 
       let ticket = null;
 
@@ -963,7 +1042,7 @@ async function startServer() {
 
       console.log(`[send-email] Recebido: ticket=${ticket.id}, isUpdate=${isUpdate}, to=${ticket.requesterEmail}`);
       const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPass = process.env.SMTP_PASS || "@Cap150957";
+      const smtpPass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
 
       // Formatar data no padrão brasileiro dd/mm/aaaa hh:mm
       const formatDateBr = (dateStr: string) => {
@@ -1182,7 +1261,7 @@ async function startServer() {
       }
 
       const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPass = process.env.SMTP_PASS || "";
+      const smtpPass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
 
       const mailOptions = {
         from: `"Risel Facilities" <${smtpUser}>`,
@@ -1392,7 +1471,7 @@ async function startServer() {
 
       // Envia o e-mail de convite
       const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPass = process.env.SMTP_PASS || "@Cap150957";
+      const smtpPass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
 
       const origin = req.headers.origin || "http://localhost:3000";
       const activationLink = `${origin}/?inviteToken=${inviteToken}`;
