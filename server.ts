@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
-import sgMail from "@sendgrid/mail";
 import nodemailer from "nodemailer";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
@@ -139,7 +138,7 @@ function saveLocalDb() {
   }
 }
 
-// Transporter SMTP via nodemailer (fallback quando SendGrid não está configurado)
+// Transporter SMTP via nodemailer (Gmail)
 let smtpTransporter: nodemailer.Transporter | null = null;
 
 function getSmtpTransporter(): nodemailer.Transporter {
@@ -159,54 +158,12 @@ function getSmtpTransporter(): nodemailer.Transporter {
   return smtpTransporter;
 }
 
-// Função de envio de e-mail: usa SendGrid API se SENDGRID_API_KEY existir, senão fallback SMTP
+// Função de envio de e-mail: usa Gmail SMTP via Nodemailer
 async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOptions: { from?: string; to: string | string[]; cc?: string | string[]; subject: string; html: string; attachments?: any[] }) {
-  const apiKey = process.env.SENDGRID_API_KEY;
-
   const fromRaw = mailOptions.from || "facilitiesrisel@gmail.com";
   const fromEmail = fromRaw.includes("<") ? fromRaw.replace(/.*<(.+?)>.*/, "$1") : fromRaw;
   const fromName = fromRaw.includes("<") ? fromRaw.replace(/"?(.+?)"?\s*<.*/, "$1") : "Facilities Risel";
 
-  if (apiKey) {
-    // --- SendGrid API (com fallback automático para SMTP) ---
-    try {
-      sgMail.setApiKey(apiKey);
-
-      const msg: any = {
-        to: mailOptions.to,
-        from: { email: fromEmail, name: fromName },
-        subject: mailOptions.subject,
-        html: mailOptions.html,
-      };
-
-      if (mailOptions.cc) {
-        if (typeof mailOptions.cc === "string" && mailOptions.cc.trim()) {
-          msg.cc = mailOptions.cc.split(",").map((e: string) => e.trim()).filter((e: string) => e && e !== fromEmail && e !== mailOptions.to);
-        } else if (Array.isArray(mailOptions.cc)) {
-          msg.cc = mailOptions.cc.filter((e: string) => e && e !== fromEmail && e !== mailOptions.to);
-        }
-        if (msg.cc && msg.cc.length === 0) delete msg.cc;
-      }
-
-      if (mailOptions.attachments && mailOptions.attachments.length > 0) {
-        msg.attachments = mailOptions.attachments.map((att: any) => ({
-          content: att.content || "",
-          filename: att.filename || "anexo",
-          type: att.contentType || "application/octet-stream",
-          disposition: "attachment",
-        }));
-      }
-
-      console.log(`[SendGrid] Enviando e-mail para ${msg.to}...`);
-      const [response] = await sgMail.send(msg);
-      console.log(`[SendGrid] E-mail enviado com sucesso! Status: ${response.statusCode}`);
-      return { messageId: response.headers["x-message-id"] || "enviado" };
-    } catch (sgError: any) {
-      console.warn(`[SendGrid] Falha no envio via SendGrid: ${sgError.message}. Tentando fallback SMTP...`);
-    }
-  }
-
-  // --- Fallback SMTP via Gmail ---
   const transporter = getSmtpTransporter();
 
   const toAddress = Array.isArray(mailOptions.to) ? mailOptions.to.join(", ") : mailOptions.to;
@@ -218,9 +175,10 @@ async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOp
     if (att.content) {
       return { filename: att.filename || "anexo", content: att.content, contentType: att.contentType || "application/octet-stream" };
     }
-    return { filename: att.filename || "anexo.jpg", path: att.path || att };
-  });
+    return null;
+  }).filter(Boolean);
 
+  console.log(`[SMTP] Enviando e-mail para ${toAddress}...`);
   const info = await transporter.sendMail({
     from: `"${fromName}" <${fromEmail}>`,
     to: toAddress,
@@ -1215,29 +1173,51 @@ async function startServer() {
         ccList.push("deny.goncalves@risel.com.br");
       }
 
-      // Processar anexos (fotos) de forma robusta
-      const attachments = [];
+      // Processar anexos (fotos/PDF) de forma robusta
+      const attachments: any[] = [];
       if (ticket.photos && Array.isArray(ticket.photos)) {
-        ticket.photos.forEach((photo: string, index: number) => {
+        for (let i = 0; i < ticket.photos.length; i++) {
+          const photo = ticket.photos[i];
           if (photo.startsWith("data:")) {
-            const matches = photo.match(/^data:(image\/\w+);base64,(.+)$/);
+            const matches = photo.match(/^data:([\w\/\-\+\.]+);base64,(.+)$/);
             if (matches) {
               const contentType = matches[1];
-              const extension = contentType.split('/')[1] || 'png';
+              const extMap: Record<string, string> = {
+                "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
+                "image/webp": "webp", "application/pdf": "pdf"
+              };
+              const extension = extMap[contentType] || contentType.split('/')[1] || "bin";
               const base64Data = matches[2];
               attachments.push({
-                filename: `anexo_chamado_${index + 1}.${extension}`,
+                filename: `anexo_chamado_${i + 1}.${extension}`,
                 content: Buffer.from(base64Data, 'base64'),
                 contentType: contentType
               });
             }
           } else if (photo.startsWith("http")) {
-            attachments.push({
-              filename: `anexo_chamado_${index + 1}.jpg`,
-              path: photo
-            });
+            try {
+              const fetchRes = await fetch(photo);
+              if (fetchRes.ok) {
+                const arrayBuf = await fetchRes.arrayBuffer();
+                const remoteContentType = fetchRes.headers.get("content-type") || "image/jpeg";
+                const extMap: Record<string, string> = {
+                  "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
+                  "image/webp": "webp", "application/pdf": "pdf"
+                };
+                const extension = extMap[remoteContentType] || remoteContentType.split('/')[1] || "jpg";
+                attachments.push({
+                  filename: `anexo_chamado_${i + 1}.${extension}`,
+                  content: Buffer.from(arrayBuf),
+                  contentType: remoteContentType
+                });
+              } else {
+                console.warn(`[send-email] Falha ao baixar anexo ${i + 1}: HTTP ${fetchRes.status}. Anexo ignorado.`);
+              }
+            } catch (e) {
+              console.warn(`[send-email] Erro ao baixar anexo ${i + 1}: ${e}. Anexo ignorado.`);
+            }
           }
-        });
+        }
       }
 
       const mailOptions = {
@@ -1253,12 +1233,11 @@ async function startServer() {
       res.json({ success: true, message: "E-mail de notificação enviado com sucesso!" });
     } catch (error: any) {
       console.error("Erro ao enviar e-mail de notificação:", error);
-      const sgDetail = error.response?.body?.errors?.map((e: any) => e.message).join("; ") || error.message;
-      res.status(500).json({ error: "Falha ao enviar e-mail de notificação: " + sgDetail });
+      res.status(500).json({ error: "Falha ao enviar e-mail de notificação: " + (error.message || error) });
     }
   });
 
-  // Teste de envio de e-mail via SendGrid API
+  // Teste de envio de e-mail via Gmail SMTP
   app.post("/api/test-email", async (req, res) => {
     try {
       const { email } = req.body;
@@ -1280,7 +1259,7 @@ async function startServer() {
             <div style="margin-top: 20px; padding: 12px; background-color: #f1f5f9; border-radius: 8px; font-size: 12px; color: #475569;">
               <strong>Configuração utilizada:</strong><br>
               • Remetente: ${smtpUser}<br>
-              • Transporte: ${process.env.SENDGRID_API_KEY ? 'SendGrid API (HTTPS)' : 'Gmail SMTP (Nodemailer)'}
+              • Transporte: Gmail SMTP (Nodemailer)
             </div>
           </div>
         `
@@ -1290,17 +1269,10 @@ async function startServer() {
       return res.json({ success: true, message: "E-mail enviado com sucesso!" });
     } catch (error: any) {
       console.error("Erro no teste de e-mail:", error);
-      let advice = "Dica: Verifique se as variáveis SMTP_USER e SMTP_PASS estão configuradas corretamente no Render.";
-      if (error.response && error.response.body) {
-        const sgErrors = error.response.body.errors || [];
-        if (sgErrors.some((e: any) => e.message && e.message.includes("verified"))) {
-          advice = "Dica: No SendGrid, vá em Settings → Sender Authentication e verifique o e-mail " + (process.env.SMTP_USER || "facilitiesrisel@gmail.com");
-        }
-      }
       return res.status(500).json({ 
         error: error.message || error, 
-        advice,
-        code: error.code || "SENDGRID_ERROR"
+        advice: "Dica: Verifique se as variáveis SMTP_USER e SMTP_PASS estão configuradas corretamente no Render.",
+        code: error.code || "SMTP_ERROR"
       });
     }
   });
