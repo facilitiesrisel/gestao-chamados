@@ -45,6 +45,12 @@ try {
     }
   }
 
+  // Se o databaseId for a string literal "(default)", o Admin SDK pode tentar buscar um banco com esse nome
+  // explícito em vez de usar a mecânica de banco padrão. Então transformamos em undefined.
+  if (databaseId === "(default)") {
+    databaseId = undefined;
+  }
+
   // Tenta carregar e validar a Service Account primeiro para extrair o Project ID de forma resiliente
   const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY || process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_FIRESTORE;
   let parsedCredentials: any = null;
