@@ -693,17 +693,18 @@ async function startServer() {
         }
       })();
 
+      // Firestore em background (já salvo em memória + local_db.json)
       if (db) {
-        try {
-          await db.collection("tickets").doc(ticket.id).set(ticket);
-          return res.json({ success: true, ticket });
-        } catch (error: any) {
-          console.error("Erro ao inserir chamado no Firestore:", error);
-          return res.json({ success: true, ticket });
-        }
-      } else {
-        return res.json({ success: true, ticket });
+        Promise.race([
+          db.collection("tickets").doc(ticket.id).set(ticket),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000))
+        ]).then(() => {
+          console.log(`Chamado ${ticket.id} sincronizado com Firestore.`);
+        }).catch((err: any) => {
+          console.warn(`Firestore: chamado ${ticket.id} não sincronizado (${err.message || err}).`);
+        });
       }
+      return res.json({ success: true, ticket });
     } catch (err: any) {
       console.error("Erro ao salvar chamado:", err);
       return res.json({ success: true, ticket: req.body.ticket });
