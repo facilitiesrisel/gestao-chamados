@@ -208,7 +208,8 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem('risel_facilities_admin_users', JSON.stringify(adminUsers));
-    if (isInitialLoadDone) {
+    const token = sessionStorage.getItem('risel_admin_token');
+    if (isInitialLoadDone && token) {
       fetch('/api/admin-users/sync', {
         method: 'POST',
         headers: getAuthHeaders(),
