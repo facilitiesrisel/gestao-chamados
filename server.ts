@@ -1395,11 +1395,12 @@ async function startServer() {
         };
 
         if (db) {
-          try {
-            await db.collection("admin_users").doc(denyUser.id).set(denyUser, { merge: true });
-          } catch (dbErr: any) {
-            console.error("Erro resiliente: falha ao salvar administrador geral no Firestore:", dbErr.message);
-          }
+          Promise.race([
+            db.collection("admin_users").doc(denyUser.id).set(denyUser, { merge: true }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000))
+          ]).catch((dbErr: any) => {
+            console.warn("Firestore: falha ao salvar admin geral:", dbErr.message);
+          });
         }
         if (!adminUsersMemoryFallback.some(u => u.email === denyUser.email)) {
           adminUsersMemoryFallback.push(denyUser);
@@ -1423,15 +1424,18 @@ async function startServer() {
       let user: any = null;
       if (db) {
         try {
-          const querySnapshot = await db.collection("admin_users").where("email", "==", normalizedEmail).get();
+          const querySnapshot = await Promise.race([
+            db.collection("admin_users").where("email", "==", normalizedEmail).get(),
+            new Promise<any>((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000))
+          ]);
           if (!querySnapshot.empty) {
             user = querySnapshot.docs[0].data();
           }
         } catch (dbErr: any) {
-          console.error("Erro resiliente: falha ao buscar usuário no Firestore, usando fallback de memória:", dbErr.message);
-          user = adminUsersMemoryFallback.find(u => u.email.trim().toLowerCase() === normalizedEmail);
+          console.warn("Firestore: fallback para memória no login:", dbErr.message);
         }
-      } else {
+      }
+      if (!user) {
         user = adminUsersMemoryFallback.find(u => u.email.trim().toLowerCase() === normalizedEmail);
       }
 
