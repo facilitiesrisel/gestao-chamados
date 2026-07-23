@@ -610,13 +610,16 @@ async function startServer() {
             </body>
             </html>
           `;
-          await sendMailWithFallback(smtpUserLocal, smtpPassLocal, {
+          sendMailWithFallback(smtpUserLocal, smtpPassLocal, {
             to: emailTo,
             from: `"Facilities Risel" <${smtpUserLocal}>`,
             subject: `[Facilities] Novo Chamado Aberto — ${ticket.id}`,
             html: newTicketHtml,
+          }).then(() => {
+            console.log(`E-mail de novo chamado enviado para ${emailTo} (chamado ${ticket.id}).`);
+          }).catch((emailErr: any) => {
+            console.error("Erro ao enviar e-mail de novo chamado:", emailErr);
           });
-          console.log(`E-mail de novo chamado enviado para ${emailTo} (chamado ${ticket.id}).`);
         }
       } catch (emailErr) {
         console.error("Erro ao enviar e-mail de novo chamado:", emailErr);
@@ -739,7 +742,9 @@ async function startServer() {
               console.error("Erro ao enviar e-mail de mudança de status:", emailErr);
             }
           };
-          await notifyStatusChange();
+          notifyStatusChange().catch((emailErr: any) => {
+            console.error("Erro ao enviar e-mail de mudança de status:", emailErr);
+          });
         }
 
         return res.json({ success: true, ticket });
@@ -989,7 +994,9 @@ async function startServer() {
         }
       };
 
-      await notifyAdminsAboutComment();
+      notifyAdminsAboutComment().catch((emailErr: any) => {
+        console.error("Erro ao enviar e-mails de interação do solicitante:", emailErr);
+      });
 
       return res.json({ success: true, message: "Observação registrada com sucesso!" });
     } catch (err: any) {
