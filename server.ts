@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
+import sgMail from "@sendgrid/mail";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
@@ -141,7 +142,14 @@ function saveLocalDb() {
   }
 }
 
-// Transporter SMTP via nodemailer (Gmail)
+// Configuração do SendGrid (fallback)
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+if (SENDGRID_API_KEY) {
+  sgMail.setApiKey(SENDGRID_API_KEY);
+  console.log("[SendGrid] API key configurada.");
+}
+
+// Transporter SMTP via nodemailer (Gmail) — porta 587 STARTTLS
 let smtpTransporter: nodemailer.Transporter | null = null;
 
 function getSmtpTransporter(): nodemailer.Transporter {
@@ -154,22 +162,23 @@ function getSmtpTransporter(): nodemailer.Transporter {
       throw new Error("SMTP_PASS não configurada. Cadastre a variável de ambiente SMTP_PASS no Render.");
     }
     smtpTransporter = nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false,
       auth: { user, pass },
       tls: { rejectUnauthorized: false },
+      connectionTimeout: 10000,
     });
-    console.log("[SMTP] Transporter Gmail inicializado com sucesso.");
+    console.log("[SMTP] Transporter Gmail (587/TLS) inicializado.");
   }
   return smtpTransporter;
 }
 
-// Função de envio de e-mail: usa Gmail SMTP via Nodemailer
+// Função de envio de e-mail: tenta Gmail SMTP, fallback para SendGrid
 async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOptions: { from?: string; to: string | string[]; cc?: string | string[]; subject: string; html: string; attachments?: any[] }) {
   const fromRaw = mailOptions.from || "facilitiesrisel@gmail.com";
   const fromEmail = fromRaw.includes("<") ? fromRaw.replace(/.*<(.+?)>.*/, "$1") : fromRaw;
   const fromName = fromRaw.includes("<") ? fromRaw.replace(/"?(.+?)"?\s*<.*/, "$1") : "Facilities Risel";
-
-  const transporter = getSmtpTransporter();
 
   const toAddress = Array.isArray(mailOptions.to) ? mailOptions.to.join(", ") : mailOptions.to;
   const ccAddress = mailOptions.cc
@@ -183,7 +192,30 @@ async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOp
     return null;
   }).filter(Boolean);
 
-  console.log(`[SMTP] Enviando e-mail para ${toAddress}...`);
+  // Tenta SendGrid primeiro se API key estiver configurada
+  if (SENDGRID_API_KEY) {
+    try {
+      console.log("[SendGrid] Enviando e-mail...");
+      const msg: any = {
+        to: toAddress,
+        from: fromEmail,
+        subject: mailOptions.subject,
+        html: mailOptions.html,
+      };
+      if (ccAddress) msg.cc = ccAddress;
+      if (mailAttachments.length > 0) msg.attachments = mailAttachments;
+      await sgMail.send(msg);
+      console.log(`[SendGrid] E-mail enviado com sucesso para ${toAddress}`);
+      return { messageId: "sendgrid" };
+    } catch (sgErr: any) {
+      console.error("[SendGrid] Falha, tentando SMTP Gmail:", sgErr.message);
+    }
+  }
+
+  // Fallback: Gmail SMTP
+  const transporter = getSmtpTransporter();
+
+  console.log(`[SMTP] Enviando e-mail para ${toAddress} (timeout 10s)...`);
   const info = await transporter.sendMail({
     from: `"${fromName}" <${fromEmail}>`,
     to: toAddress,
@@ -1308,19 +1340,27 @@ async function startServer() {
     try {
       const result = await Promise.race([
         sendMailWithFallback(smtpUser, smtpPass, mailOptions),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout após 15 segundos")), 15000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout após 30 segundos")), 30000))
       ]);
       return res.json({ success: true, message: "E-mail enviado com sucesso!" });
     } catch (error: any) {
       console.error("Erro no teste de e-mail:", error);
-      const advice = error.code === "EAUTH"
-        ? "Falha de autenticação. Verifique se a senha do SMTP_PASS está correta. Se for App Password do Gmail, gere uma nova em https://myaccount.google.com/apppasswords"
-        : "Verifique se as variáveis SMTP_USER e SMTP_PASS estão configuradas corretamente no Render.";
+      const isAuth = error.code === "EAUTH";
+      const advice = isAuth
+        ? "Falha de autenticação. Crie uma App Password em https://myaccount.google.com/apppasswords e configure SMTP_PASS no Render."
+        : !SENDGRID_API_KEY
+          ? "Não foi possível conectar ao Gmail SMTP. Configure uma chave SENDGRID_API_KEY no Render como alternativa mais confiável."
+          : "Ambos Gmail e SendGrid falharam. Verifique as credenciais.";
       return res.status(500).json({
         error: error.message || String(error),
         code: error.code || "SMTP_ERROR",
         advice,
-        config: { smtpUser, smtpPassDefined: !!smtpPass, smtpPassLength: smtpPass?.length }
+        config: {
+          smtpUser,
+          smtpPassDefined: !!smtpPass,
+          smtpPassLength: smtpPass?.length,
+          sendgridConfigured: !!SENDGRID_API_KEY
+        }
       });
     }
   });
