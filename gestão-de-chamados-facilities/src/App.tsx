@@ -16,29 +16,6 @@ import AdminLogin from './components/AdminLogin';
 import AdminRegisters from './components/AdminRegisters';
 import SetupPassword from './components/SetupPassword';
 import ChangePasswordModal from './components/ChangePasswordModal';
-import PublicTicketView from './components/PublicTicketView';
-
-// Funções auxiliares para autorização de APIs protegidas
-const getAuthHeaders = (extraHeaders = {}) => {
-  const token = sessionStorage.getItem('risel_admin_token');
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-    ...extraHeaders
-  };
-};
-
-const handleAuthError = (res: Response) => {
-  if (res.status === 401 || res.status === 403) {
-    sessionStorage.removeItem('risel_admin_auth');
-    sessionStorage.removeItem('risel_admin_token');
-    sessionStorage.removeItem('risel_admin_name');
-    sessionStorage.removeItem('risel_admin_email');
-    window.location.reload();
-    throw new Error('Sessão expirada. Faça login novamente.');
-  }
-  return res;
-};
 
 export default function App() {
   // --- STATE FOR TICKETS ---
@@ -109,20 +86,11 @@ export default function App() {
   // Token de convite por e-mail na URL
   const [inviteToken, setInviteToken] = useState<string | null>(null);
 
-  // Acesso público via URL /chamado/:id
-  const [publicTicketId, setPublicTicketId] = useState<string | null>(null);
-
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const token = params.get('inviteToken');
     if (token) {
       setInviteToken(token);
-    }
-
-    // Verifica se a URL é /chamado/:id
-    const pathParts = window.location.pathname.split('/').filter(Boolean);
-    if (pathParts.length === 2 && pathParts[0] === 'chamado') {
-      setPublicTicketId(pathParts[1]);
     }
   }, []);
 
@@ -175,10 +143,9 @@ export default function App() {
     if (isInitialLoadDone) {
       fetch('/api/maintenance-items/sync', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ items: maintenanceItems })
-      })
-      .catch(err => console.error('Erro ao sincronizar itens com o Firebase:', err));
+      }).catch(err => console.error('Erro ao sincronizar itens com o Firebase:', err));
     }
   }, [maintenanceItems, isInitialLoadDone]);
 
@@ -187,10 +154,9 @@ export default function App() {
     if (isInitialLoadDone) {
       fetch('/api/operational-bases/sync', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ bases: operationalBases })
-      })
-      .catch(err => console.error('Erro ao sincronizar bases com o Firebase:', err));
+      }).catch(err => console.error('Erro ao sincronizar bases com o Firebase:', err));
     }
   }, [operationalBases, isInitialLoadDone]);
 
@@ -199,10 +165,9 @@ export default function App() {
     if (isInitialLoadDone) {
       fetch('/api/urgency-configs/sync', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ configs: urgencyConfigs })
-      })
-      .catch(err => console.error('Erro ao sincronizar urgências com o Firebase:', err));
+      }).catch(err => console.error('Erro ao sincronizar urgências com o Firebase:', err));
     }
   }, [urgencyConfigs, isInitialLoadDone]);
 
@@ -211,10 +176,9 @@ export default function App() {
     if (isInitialLoadDone) {
       fetch('/api/admin-users/sync', {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ users: adminUsers })
-      })
-      .catch(err => console.error('Erro ao sincronizar administradores com o Firebase:', err));
+      }).catch(err => console.error('Erro ao sincronizar administradores com o Firebase:', err));
     }
   }, [adminUsers, isInitialLoadDone]);
 
@@ -245,11 +209,9 @@ export default function App() {
           const isDbActive = statusData.configured;
 
           if (isDbActive) {
-            // Se o Firebase está ativo, usamos os dados reais do banco.
-            // Só sobrescreve se o banco realmente tiver dados, evitando perder chamados locais
-            if (ticketsData && ticketsData.length > 0) {
-              setTickets(ticketsData);
-            }
+            // Se o Firebase está ativo, usamos os dados reais do banco. 
+            // Se o banco estiver vazio, iniciamos com vazio [] para começar do zero com dados reais!
+            setTickets(ticketsData || []);
           } else {
             // Se o Firebase não está ativo, usamos o localStorage ou fallback comum
             if (Array.isArray(ticketsData) && ticketsData.length > 0) {
@@ -268,7 +230,7 @@ export default function App() {
             // Sincroniza dados padrão no primeiro acesso se o banco estiver vazio para manter o app funcional
             fetch('/api/maintenance-items/sync', {
               method: 'POST',
-              headers: getAuthHeaders(),
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ items: maintenanceItems })
             }).catch(e => console.error(e));
           }
@@ -284,7 +246,7 @@ export default function App() {
             // Sincroniza dados padrão no primeiro acesso
             fetch('/api/operational-bases/sync', {
               method: 'POST',
-              headers: getAuthHeaders(),
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ bases: operationalBases })
             }).catch(e => console.error(e));
           }
@@ -300,25 +262,25 @@ export default function App() {
             // Sincroniza dados padrão no primeiro acesso
             fetch('/api/urgency-configs/sync', {
               method: 'POST',
-              headers: getAuthHeaders(),
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ configs: urgencyConfigs })
             }).catch(e => console.error(e));
           }
         }
 
-        // 5. Busca Administradores (Protegido por token se logado)
-        const token = sessionStorage.getItem('risel_admin_token');
-        if (token) {
-          const adminsRes = await fetch('/api/admin-users', {
-            headers: getAuthHeaders()
-          });
-          if (adminsRes.ok) {
-            const adminsData = await adminsRes.json();
-            if (Array.isArray(adminsData) && adminsData.length > 0) {
-              setAdminUsers(adminsData);
-            }
+        // 5. Busca Administradores
+        const adminsRes = await fetch('/api/admin-users');
+        if (adminsRes.ok) {
+          const adminsData = await adminsRes.json();
+          if (Array.isArray(adminsData) && adminsData.length > 0) {
+            setAdminUsers(adminsData);
           } else {
-            // Token inválido ou expirado, ignora silenciosamente
+            // Sincroniza dados padrão no primeiro acesso
+            fetch('/api/admin-users/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ users: adminUsers })
+            }).catch(e => console.error(e));
           }
         }
 
@@ -332,57 +294,11 @@ export default function App() {
     loadAllData();
   }, []);
 
-  // --- REFRESH AUTOMÁTICO DE CHAMADOS (a cada 30 segundos) ---
-  useEffect(() => {
-    if (!isInitialLoadDone) return;
-
-    const refreshTickets = async () => {
-      try {
-        const ticketsRes = await fetch('/api/tickets');
-        if (ticketsRes.ok) {
-          const ticketsData = await ticketsRes.json();
-          if (Array.isArray(ticketsData)) {
-            setTickets(prev => {
-              // Só atualiza se os dados forem diferentes
-              const prevIds = prev.map((t: any) => t.id).sort().join(',');
-              const newIds = ticketsData.map((t: any) => t.id).sort().join(',');
-              if (prevIds !== newIds || JSON.stringify(prev) !== JSON.stringify(ticketsData)) {
-                localStorage.setItem('risel_facilities_tickets', JSON.stringify(ticketsData));
-                return ticketsData;
-              }
-              return prev;
-            });
-          }
-        }
-      } catch (e) {
-        // Ignora erros de rede no refresh silencioso
-      }
-    };
-
-    const intervalId = setInterval(refreshTickets, 30000);
-    return () => clearInterval(intervalId);
-  }, [isInitialLoadDone]);
-
   // --- ACTIONS ---
-  const handleAddTicket = async (newTicketData: Omit<Ticket, 'id' | 'createdAt' | 'updatedAt' | 'isSlaViolated'>): Promise<string> => {
-    // Pede o próximo ID ao servidor (garante unicidade)
-    let newId: string;
-    try {
-      const idRes = await fetch('/api/tickets/next-id');
-      if (idRes.ok) {
-        const idData = await idRes.json();
-        newId = idData.id;
-      } else {
-        // Fallback local
-        const year = new Date().getFullYear();
-        const sequence = String(tickets.length + 1).padStart(3, '0');
-        newId = `CHA-${year}-${sequence}`;
-      }
-    } catch {
-      const year = new Date().getFullYear();
-      const sequence = String(tickets.length + 1).padStart(3, '0');
-      newId = `CHA-${year}-${sequence}`;
-    }
+  const handleAddTicket = (newTicketData: Omit<Ticket, 'id' | 'createdAt' | 'updatedAt' | 'isSlaViolated'>): string => {
+    const year = new Date().getFullYear();
+    const sequence = String(tickets.length + 1).padStart(3, '0');
+    const newId = `CHA-${year}-${sequence}`;
 
     const newTicket: Ticket = {
       ...newTicketData,
@@ -400,18 +316,20 @@ export default function App() {
     });
 
     // Envia para o banco de dados via API do backend
-    try {
-      const ticketRes = await fetch('/api/tickets', {
+    fetch('/api/tickets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket: newTicket })
+    })
+    .then(() => {
+      // Envia e-mail de confirmação assincronamente ao criar com sucesso
+      return fetch('/api/send-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ticket: newTicket })
+        body: JSON.stringify({ ticket: newTicket, isUpdate: false })
       });
-      if (!ticketRes.ok) {
-        console.error('Erro ao registrar chamado no backend:', ticketRes.status, await ticketRes.text());
-      }
-    } catch (err) {
-      console.error('Erro ao registrar chamado no backend:', err);
-    }
+    })
+    .catch(err => console.error('Erro ao registrar chamado no backend:', err));
 
     return newId;
   };
@@ -430,10 +348,23 @@ export default function App() {
     // Envia atualização ao banco de dados via API do backend
     fetch(`/api/tickets/${updatedTicket.id}`, {
       method: 'PUT',
-      headers: getAuthHeaders(),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ticket: updatedTicket })
     })
-    .then(handleAuthError)
+    .then(() => {
+      // Se houve mudança de status, dispara e-mail de atualização
+      if (statusChanged) {
+        fetch('/api/send-email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticket: updatedTicket,
+            isUpdate: true,
+            updateMessage: `O status do seu chamado ${updatedTicket.id} foi atualizado para: "${updatedTicket.status}".`
+          })
+        }).catch(err => console.error('Erro ao enviar e-mail de atualização:', err));
+      }
+    })
     .catch(err => console.error('Erro ao atualizar chamado no backend:', err));
   };
 
@@ -447,10 +378,8 @@ export default function App() {
 
     // 2. Envia a requisição de exclusão para o backend
     fetch(`/api/tickets/${ticketId}`, {
-      method: 'DELETE',
-      headers: getAuthHeaders()
+      method: 'DELETE'
     })
-    .then(handleAuthError)
     .catch(err => console.error('Erro ao excluir chamado no backend:', err));
   };
 
@@ -461,10 +390,8 @@ export default function App() {
 
     // 2. Envia a requisição de reset geral para o backend
     fetch('/api/tickets/reset', {
-      method: 'POST',
-      headers: getAuthHeaders()
+      method: 'POST'
     })
-    .then(handleAuthError)
     .catch(err => console.error('Erro ao resetar chamados no backend:', err));
   };
 
@@ -548,31 +475,7 @@ export default function App() {
       />
 
       {/* RENDER PRINCIPAL DO LAYOUT */}
-      {publicTicketId ? (
-        /* --- ACESSO PÚBLICO AO CHAMADO (sem login) --- */
-        <div className="flex-1 flex flex-col min-h-screen z-10 relative">
-          <header className="bg-white/80 backdrop-blur-md border-b border-slate-200/60 px-4 sm:px-6 py-4 shrink-0 shadow-sm">
-            <div className="max-w-3xl mx-auto flex items-center gap-3">
-              <img 
-                src="https://i.ibb.co/My6STcDv/71144827-2525571747712417-6231227587708846080-n.jpg" 
-                alt="Risel Facilities" 
-                className="w-8 h-8 rounded-full object-cover border border-slate-300 shrink-0"
-                referrerPolicy="no-referrer"
-              />
-              <div>
-                <h1 className="text-sm font-bold font-display text-slate-800 uppercase tracking-tight">Risel Facilities</h1>
-                <p className="text-[10px] text-slate-400">Acompanhamento Público de Chamado</p>
-              </div>
-            </div>
-          </header>
-          <main className="flex-1 max-w-3xl w-full mx-auto px-4 sm:px-6 py-6">
-            <PublicTicketView ticketId={publicTicketId} />
-          </main>
-          <footer className="text-slate-400 py-4 text-center text-xs bg-white/40 border-t border-slate-100">
-            <p>&copy; {new Date().getFullYear()} Risel Facilities. Todos os direitos reservados.</p>
-          </footer>
-        </div>
-      ) : profile === 'admin' && isAdminAuthenticated ? (
+      {profile === 'admin' && isAdminAuthenticated ? (
         
         <div className="flex h-screen overflow-hidden z-10 relative">
           

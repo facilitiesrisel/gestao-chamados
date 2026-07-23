@@ -1,0 +1,14 @@
+{
+  "tickets": [
+    {
+      "title": "Test 2",
+      "status": "Aberta",
+      "requesterEmail": "test@example.com",
+      "id": "CHA-2026-59632"
+    }
+  ],
+  "maintenanceItems": [],
+  "operationalBases": [],
+  "urgencyConfigs": [],
+  "adminUsers": []
+}

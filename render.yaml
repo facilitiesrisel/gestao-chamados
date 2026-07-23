@@ -24,11 +24,9 @@ services:
         sync: false
       - key: FIREBASE_PROJECT_ID
         value: ai-studio-applet-webapp-3f137
-      - key: FIREBASE_DATABASE_ID
-        value: "(default)"
       - key: FIREBASE_SERVICE_ACCOUNT_KEY
         sync: false
-      - key: FIREBASE_FIRESTORE_DATABASE_ID
-        value: "(default)"
+      # FIREBASE_DATABASE_ID e FIREBASE_FIRESTORE_DATABASE_ID removidos intencionalmente.
+      # O valor real do banco nomeado é lido do firebase-applet-config.json no servidor.
       - key: JWT_SECRET
         generateValue: true

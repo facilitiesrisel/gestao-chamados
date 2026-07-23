@@ -1,29 +1,13 @@
 import express from "express";
 import path from "path";
+import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import fs from "fs";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
 
 dotenv.config();
-
-// Handler global: impede que rejeições assíncronas do SDK do Google Cloud (Firestore/gRPC)
-// derrubem o servidor quando as credenciais padrão (ADC) não estão configuradas localmente.
-process.on("unhandledRejection", (reason: any) => {
-  const msg = String(reason?.message || reason || "");
-  if (
-    msg.includes("Could not load the default credentials") ||
-    msg.includes("All promises were rejected") ||
-    msg.includes("MetadataLookupWarning")
-  ) {
-    console.warn("[Firebase/gRPC] Credencial padrão ausente — operação ignorada de forma resiliente.");
-  } else {
-    console.error("[unhandledRejection]", reason);
-  }
-});
 
 // Inicialização opcional e resiliente do Firebase Firestore
 let db: any = null;
@@ -38,19 +22,10 @@ try {
     try {
       const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
       projectId = projectId || config.projectId;
-      const envDbId = process.env.FIREBASE_DATABASE_ID || process.env.FIREBASE_FIRESTORE_DATABASE_ID;
-      if (envDbId && envDbId !== "(default)") {
-        databaseId = envDbId;
-      } else if (config.firestoreDatabaseId) {
-        databaseId = config.firestoreDatabaseId;
-      }
+      databaseId = databaseId || config.firestoreDatabaseId;
     } catch (e) {
       console.warn("Falha ao ler firebase-applet-config.json:", e);
     }
-  }
-
-  if (databaseId === "(default)") {
-    databaseId = undefined;
   }
 
   // Tenta carregar e validar a Service Account primeiro para extrair o Project ID de forma resiliente
@@ -87,14 +62,14 @@ try {
     };
 
     if (parsedCredentials) {
-      configOptions.credential = (admin as any).cert(parsedCredentials);
+      configOptions.credential = (admin as any).credential.cert(parsedCredentials);
     }
 
     let app;
-    try {
-      app = (admin as any).app();
-    } catch {
+    if ((admin as any).apps.length === 0) {
       app = admin.initializeApp(configOptions);
+    } else {
+      app = (admin as any).app();
     }
     
     db = getFirestore(app, databaseId || undefined);
@@ -107,134 +82,59 @@ try {
   console.error("Erro ao inicializar Firebase Admin:", err);
 }
 
-// Armazenamento em memória persistente do servidor caso o Firebase falhe
+// Armazenamento em memória do servidor caso o Firebase não esteja ativo ou falhe
 let ticketsMemoryFallback: any[] = [];
 let maintenanceItemsMemoryFallback: any[] = [];
 let operationalBasesMemoryFallback: any[] = [];
 let urgencyConfigsMemoryFallback: any[] = [];
 let adminUsersMemoryFallback: any[] = [];
 
-const localDbPath = path.join(process.cwd(), "local_db.json");
-if (fs.existsSync(localDbPath)) {
-  try {
-    const data = JSON.parse(fs.readFileSync(localDbPath, "utf-8"));
-    if (data.tickets) ticketsMemoryFallback = data.tickets;
-    if (data.maintenanceItems) maintenanceItemsMemoryFallback = data.maintenanceItems;
-    if (data.operationalBases) operationalBasesMemoryFallback = data.operationalBases;
-    if (data.urgencyConfigs) urgencyConfigsMemoryFallback = data.urgencyConfigs;
-    if (data.adminUsers) adminUsersMemoryFallback = data.adminUsers;
-  } catch (e) {
-    console.error("Erro ao ler local_db.json", e);
-  }
-}
-function saveLocalDb() {
-  try {
-    fs.writeFileSync(localDbPath, JSON.stringify({
-      tickets: ticketsMemoryFallback,
-      maintenanceItems: maintenanceItemsMemoryFallback,
-      operationalBases: operationalBasesMemoryFallback,
-      urgencyConfigs: urgencyConfigsMemoryFallback,
-      adminUsers: adminUsersMemoryFallback
-    }, null, 2));
-  } catch (e) {
-    console.error("Erro ao salvar local_db.json", e);
-  }
-}
-
-// Transporter SMTP via nodemailer (Gmail)
-let smtpTransporter: nodemailer.Transporter | null = null;
-
-function getSmtpTransporter(): nodemailer.Transporter {
-  if (!smtpTransporter) {
-    const user = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-    const pass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
-    if (!pass) {
-      throw new Error("SMTP_PASS não configurada. Cadastre a variável de ambiente SMTP_PASS no Render.");
-    }
-    smtpTransporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user, pass },
-      tls: { rejectUnauthorized: false },
+// Função utilitária resiliente para envio de e-mail com fallback automático de portas (465 SSL para 587 TLS)
+async function sendMailWithFallback(smtpUser: string, smtpPass: string, mailOptions: nodemailer.SendMailOptions) {
+  const createTransporter = (port: number, secure: boolean) => {
+    return nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: port,
+      secure: secure,
+      auth: {
+        user: smtpUser,
+        pass: smtpPass,
+      },
+      tls: {
+        rejectUnauthorized: false
+      },
+      connectionTimeout: 8000, // 8 segundos de timeout para cada tentativa
     });
-    console.log("[SMTP] Transporter Gmail inicializado com sucesso.");
-  }
-  return smtpTransporter;
-}
+  };
 
-// Função de envio de e-mail: usa Gmail SMTP via Nodemailer
-async function sendMailWithFallback(_smtpUser: string, _smtpPass: string, mailOptions: { from?: string; to: string | string[]; cc?: string | string[]; subject: string; html: string; attachments?: any[] }) {
-  const fromRaw = mailOptions.from || "facilitiesrisel@gmail.com";
-  const fromEmail = fromRaw.includes("<") ? fromRaw.replace(/.*<(.+?)>.*/, "$1") : fromRaw;
-  const fromName = fromRaw.includes("<") ? fromRaw.replace(/"?(.+?)"?\s*<.*/, "$1") : "Facilities Risel";
-
-  const transporter = getSmtpTransporter();
-
-  const toAddress = Array.isArray(mailOptions.to) ? mailOptions.to.join(", ") : mailOptions.to;
-  const ccAddress = mailOptions.cc
-    ? (typeof mailOptions.cc === "string" ? mailOptions.cc : mailOptions.cc.join(", "))
-    : undefined;
-
-  const mailAttachments = (mailOptions.attachments || []).map((att: any) => {
-    if (att.content) {
-      return { filename: att.filename || "anexo", content: att.content, contentType: att.contentType || "application/octet-stream" };
+  try {
+    console.log(`Tentando enviar e-mail via SMTP Gmail na porta 465 (SSL direta) com remetente ${smtpUser}...`);
+    const transporter465 = createTransporter(465, true);
+    const info = await transporter465.sendMail(mailOptions);
+    console.log("E-mail enviado com sucesso via porta 465!");
+    return info;
+  } catch (err465: any) {
+    console.warn("Falha no envio do e-mail pela porta 465 (SSL direta). Erro:", err465.message || err465);
+    console.log("Tentando canal alternativo na porta 587 (STARTTLS/TLS)...");
+    try {
+      const transporter587 = createTransporter(587, false);
+      const info = await transporter587.sendMail(mailOptions);
+      console.log("E-mail enviado com sucesso via porta 587!");
+      return info;
+    } catch (err587: any) {
+      console.error("Falha também no envio pela porta 587 (STARTTLS). Erro:", err587.message || err587);
+      throw new Error(`Ambas as portas de envio de e-mail (465 e 587) falharam.\nErro Porta 465: ${err465.message}\nErro Porta 587: ${err587.message}`);
     }
-    return null;
-  }).filter(Boolean);
-
-  console.log(`[SMTP] Enviando e-mail para ${toAddress}...`);
-  const info = await transporter.sendMail({
-    from: `"${fromName}" <${fromEmail}>`,
-    to: toAddress,
-    cc: ccAddress,
-    subject: mailOptions.subject,
-    html: mailOptions.html,
-    attachments: mailAttachments.length > 0 ? mailAttachments : undefined,
-  });
-
-  console.log(`[SMTP] E-mail enviado com sucesso! MessageId: ${info.messageId}`);
-  return { messageId: info.messageId };
-}
-
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  console.error("[SEGURANÇA] JWT_SECRET não está configurado! As autenticações podem falhar. Defina a variável de ambiente JWT_SECRET.");
-}
-
-// Middleware para validar token JWT nas rotas protegidas
-function authenticateToken(req: any, res: any, next: any) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: "Token de autenticação ausente ou inválido." });
   }
-
-  jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
-    if (err) {
-      return res.status(403).json({ error: "Sessão expirada ou acesso negado. Faça login novamente." });
-    }
-    req.user = user;
-    next();
-  });
 }
-
-const app = express();
 
 async function startServer() {
+  const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
   // Permite payloads maiores para suportar anexos de imagem se necessário
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
-
-  // Headers de segurança
-  app.use((_req, res, next) => {
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("X-XSS-Protection", "1; mode=block");
-    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-    next();
-  });
 
   // --- ROTAS DO FIREBASE / TICKETS ---
 
@@ -428,7 +328,7 @@ async function startServer() {
   });
 
   // 4. Administradores / Gestores de Frota
-  app.get("/api/admin-users", authenticateToken, async (req, res) => {
+  app.get("/api/admin-users", async (req, res) => {
     try {
       if (db) {
         const snapshot = await db.collection("admin_users").get();
@@ -443,7 +343,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/admin-users/sync", authenticateToken, async (req, res) => {
+  app.post("/api/admin-users/sync", async (req, res) => {
     try {
       const { users } = req.body;
       if (!Array.isArray(users)) return res.status(400).json({ error: "Dados inválidos" });
@@ -500,127 +400,15 @@ async function startServer() {
   });
 
 
-  // Gerar próximo ID de chamado (garante unicidade via Firestore)
-  app.get("/api/tickets/next-id", async (req, res) => {
-    try {
-      const year = new Date().getFullYear();
-      let nextSeq = 1;
-
-      if (db) {
-        try {
-          // Usa um documento de controle para gerar o próximo número sequencial
-          const counterRef = db.collection("counters").doc("ticket_counter");
-          const counterDoc = await counterRef.get();
-
-          if (counterDoc.exists) {
-            const data = counterDoc.data();
-            if (data && data.year === year) {
-              nextSeq = (data.lastNumber || 0) + 1;
-            }
-            // Se o ano mudou, reinicia em 1
-          }
-          await counterRef.set({ year, lastNumber: nextSeq });
-        } catch (e) {
-          console.error("Erro ao gerar próximo ID via Firestore:", e);
-          // Fallback: usa timestamp
-          nextSeq = Date.now() % 100000;
-        }
-      } else {
-        nextSeq = ticketsMemoryFallback.length + 1;
-      }
-
-      const sequence = String(nextSeq).padStart(3, '0');
-      const newId = `CHA-${year}-${sequence}`;
-      return res.json({ id: newId });
-    } catch (err: any) {
-      console.error("Erro ao gerar próximo ID:", err);
-      const fallbackId = `CHA-${new Date().getFullYear()}-${Date.now().toString().slice(-3)}`;
-      return res.json({ id: fallbackId });
-    }
-  });
-
   // Cadastrar novo chamado
   app.post("/api/tickets", async (req, res) => {
     try {
       const { ticket } = req.body;
-      if (!ticket) {
+      if (!ticket || !ticket.id) {
         return res.status(400).json({ error: "Dados do chamado inválidos." });
       }
 
-      // Se não veio ID, gera um no servidor
-      if (!ticket.id) {
-        const year = new Date().getFullYear();
-        let nextSeq = 1;
-        if (db) {
-          try {
-            const counterRef = db.collection("counters").doc("ticket_counter");
-            const counterDoc = await counterRef.get();
-            if (counterDoc.exists) {
-              const data = counterDoc.data();
-              if (data && data.year === year) {
-                nextSeq = (data.lastNumber || 0) + 1;
-              }
-            }
-            await counterRef.set({ year, lastNumber: nextSeq });
-          } catch (e) {
-            console.error("Erro ao gerar ID via Firestore:", e);
-            nextSeq = Date.now() % 100000;
-          }
-        } else {
-          nextSeq = ticketsMemoryFallback.length + 1;
-        }
-        ticket.id = `CHA-${year}-${String(nextSeq).padStart(3, '0')}`;
-      }
-
       ticketsMemoryFallback = [ticket, ...ticketsMemoryFallback.filter(t => t.id !== ticket.id)];
-      saveLocalDb(); // Salva na base de dados local permanentemente
-
-      // Envia e-mail notificando a abertura do novo chamado
-      try {
-        const smtpUserLocal = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-        const smtpPassLocal = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
-        const emailTo = ticket.requesterEmail || ticket.email;
-        if (emailTo && smtpPassLocal) {
-          const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
-          const newTicketHtml = `
-            <!DOCTYPE html>
-            <html lang="pt-BR">
-            <head><meta charset="UTF-8"></head>
-            <body style="margin:0;padding:0;background-color:#f1f5f9;">
-            <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
-              <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
-                <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
-                <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">CHAMADO ABERTO COM SUCESSO</p>
-              </div>
-              <div style="padding: 28px; color: #334155;">
-                <p style="font-size:15px;">Olá, <strong>${ticket.requesterName || "Solicitante"}</strong>,</p>
-                <p style="font-size:14px;color:#475569;">Seu chamado foi registrado com sucesso e será analisado em breve.</p>
-                <div style="background:#f0fdf4;border-left:4px solid #247d52;padding:16px;border-radius:8px;margin:16px 0;">
-                  <p style="margin:0;font-size:13px;color:#15803d;">
-                    <strong>Protocolo:</strong> ${ticket.id}<br>
-                    <strong>Status:</strong> ${ticket.status}<br>
-                    <strong>Item:</strong> ${ticket.maintenanceItem || ticket.title || "—"}
-                  </p>
-                </div>
-                <div style="text-align:center;margin:20px 0;">
-                  <a href="${publicUrl}" style="display:inline-block;background-color:#247d52;color:#ffffff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;">Acompanhar Chamado</a>
-                </div>
-              </div>
-            </div>
-            </body>
-            </html>
-          `;
-          await sendMailWithFallback(smtpUserLocal, smtpPassLocal, {
-            to: emailTo,
-            from: `"Facilities Risel" <${smtpUserLocal}>`,
-            subject: `[Facilities] Novo Chamado Aberto — ${ticket.id}`,
-            html: newTicketHtml,
-          });
-          console.log(`E-mail de novo chamado enviado para ${emailTo} (chamado ${ticket.id}).`);
-        }
-      } catch (emailErr) {
-        console.error("Erro ao enviar e-mail de novo chamado:", emailErr);
-      }
 
       if (db) {
         try {
@@ -648,150 +436,30 @@ async function startServer() {
         return res.status(400).json({ error: "Dados do chamado ausentes." });
       }
 
-      const smtpUserLocal = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPassLocal = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
+      ticketsMemoryFallback = ticketsMemoryFallback.map(t => t.id === id ? ticket : t);
 
-      const authHeader = req.headers['authorization'];
-      const token = authHeader && authHeader.split(' ')[1];
-
-      let isAuthenticated = false;
-      if (token) {
+      if (db) {
         try {
-          jwt.verify(token, JWT_SECRET);
-          isAuthenticated = true;
-        } catch (jwtErr) {
-          // Token inválido, mas não falha imediatamente pois pode ser o solicitante avaliando
+          await db.collection("tickets").doc(id).set(ticket, { merge: true });
+          return res.json({ success: true, ticket });
+        } catch (error: any) {
+          console.error("Erro ao atualizar chamado no Firestore:", error);
+          return res.json({ success: true, ticket });
         }
-      }
-
-      if (isAuthenticated) {
-        // Busca o ticket anterior para detectar mudança de status
-        let previousTicket: any = null;
-        if (db) {
-          try {
-            const prevDoc = await db.collection("tickets").doc(id).get();
-            if (prevDoc.exists) previousTicket = { id: prevDoc.id, ...prevDoc.data() };
-          } catch (e) { /* ignore */ }
-        }
-        if (!previousTicket) {
-          previousTicket = ticketsMemoryFallback.find((t: any) => t.id === id) || null;
-        }
-
-        // Admin autenticado: pode atualizar o ticket completo
-        ticketsMemoryFallback = ticketsMemoryFallback.map((t: any) => t.id === id ? ticket : t);
-        saveLocalDb(); // Salva base local permanentemente
-
-        if (db) {
-          try {
-            await db.collection("tickets").doc(id).set(ticket, { merge: true });
-          } catch (dbErr) {
-            console.error("Erro ao atualizar chamado no Firestore (Admin):", dbErr);
-          }
-        }
-
-        // Envia e-mail se o status mudou
-        const statusChanged = previousTicket && previousTicket.status !== ticket.status;
-        if (statusChanged) {
-          const notifyStatusChange = async () => {
-            try {
-              const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
-              const statusHtml = `
-                <!DOCTYPE html>
-                <html lang="pt-BR">
-                <head><meta charset="UTF-8"></head>
-                <body style="margin:0;padding:0;background-color:#f1f5f9;">
-                <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
-                  <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
-                    <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
-                    <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">ATUALIZAÇÃO DE STATUS</p>
-                  </div>
-                  <div style="padding: 28px; color: #334155;">
-                    <p style="font-size:15px;">Olá, <strong>${ticket.requesterName || "Solicitante"}</strong>,</p>
-                    <p style="font-size:14px;color:#475569;">O status do seu chamado foi atualizado:</p>
-                    <div style="background:#f0fdf4;border-left:4px solid #247d52;padding:16px;border-radius:8px;margin:16px 0;">
-                      <p style="margin:0;font-size:13px;color:#15803d;">
-                        <strong>De:</strong> ${previousTicket.status || "—"}<br>
-                        <strong>Para:</strong> ${ticket.status}
-                      </p>
-                    </div>
-                    ${ticket.technicalNotes ? `
-                    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:20px;margin:16px 0;">
-                      <h3 style="margin:0 0 8px 0;color:#1e40af;font-size:13px;">Notas Técnicas</h3>
-                      <p style="margin:0;font-size:13px;color:#1e3a5f;white-space:pre-wrap;">${ticket.technicalNotes}</p>
-                    </div>
-                    ` : ""}
-                    <div style="text-align:center;margin:20px 0;">
-                      <a href="${publicUrl}" style="display:inline-block;background-color:#247d52;color:#ffffff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;">Acessar Chamado ${ticket.id}</a>
-                    </div>
-                  </div>
-                </div>
-                </body>
-                </html>
-              `;
-              await sendMailWithFallback(smtpUserLocal, smtpPassLocal, {
-                to: ticket.requesterEmail || ticket.email,
-                from: `"Facilities Risel" <${smtpUserLocal}>`,
-                subject: `[Facilities] Status atualizado — Chamado ${ticket.id}`,
-                html: statusHtml,
-              });
-              console.log(`E-mail de mudança de status enviado para ${ticket.requesterEmail || ticket.email} (chamado ${ticket.id}).`);
-            } catch (emailErr) {
-              console.error("Erro ao enviar e-mail de mudança de status:", emailErr);
-            }
-          };
-          await notifyStatusChange();
-        }
-
-        return res.json({ success: true, ticket });
       } else {
-        // Solicitante comum: só pode atualizar satisfactionRating e feedbackText
-        const rating = ticket.satisfactionRating;
-        const feedback = ticket.feedbackText;
-
-        // Se o solicitante tentar alterar outros campos confidenciais sem token, bloqueia
-        // (exemplo simples de proteção contra injeção direta)
-        
-        // Atualiza fallback em memória
-        ticketsMemoryFallback = ticketsMemoryFallback.map(t => {
-          if (t.id === id) {
-            return {
-              ...t,
-              satisfactionRating: rating,
-              feedbackText: feedback,
-              updatedAt: new Date().toISOString()
-            };
-          }
-          return t;
-        });
-        saveLocalDb();
-
-        if (db) {
-          try {
-            await db.collection("tickets").doc(id).update({
-              satisfactionRating: rating !== undefined ? rating : null,
-              feedbackText: feedback !== undefined ? feedback : "",
-              updatedAt: new Date().toISOString()
-            });
-          } catch (dbErr) {
-            console.error("Erro ao atualizar feedback no Firestore (Público):", dbErr);
-          }
-        }
-
-        const updatedTicketInMem = ticketsMemoryFallback.find(t => t.id === id) || ticket;
-        return res.json({ success: true, ticket: updatedTicketInMem });
+        return res.json({ success: true, ticket });
       }
     } catch (err: any) {
       console.error("Erro ao atualizar chamado:", err);
-      return res.status(500).json({ error: "Erro interno no servidor ao atualizar chamado." });
+      return res.json({ success: true, ticket: req.body.ticket });
     }
   });
 
   // Excluir chamado individualmente
-  app.delete("/api/tickets/:id", authenticateToken, async (req, res) => {
+  app.delete("/api/tickets/:id", async (req, res) => {
     try {
       const { id } = req.params;
       ticketsMemoryFallback = ticketsMemoryFallback.filter(t => t.id !== id);
-      saveLocalDb();
 
       if (db) {
         try {
@@ -810,7 +478,7 @@ async function startServer() {
   });
 
   // Zerar todos os chamados (Banco de Dados de Chamados)
-  app.post("/api/tickets/reset", authenticateToken, async (req, res) => {
+  app.post("/api/tickets/reset", async (req, res) => {
     try {
       ticketsMemoryFallback = [];
 
@@ -834,170 +502,6 @@ async function startServer() {
     }
   });
 
-  // --- ROTAS PÚBLICAS (sem autenticação) ---
-
-  // Acesso público a um chamado por ID (sem login)
-  app.get("/api/tickets/public/:id", async (req, res) => {
-    try {
-      const { id } = req.params;
-      let ticket = null;
-
-      if (db) {
-        try {
-          const doc = await db.collection("tickets").doc(id).get();
-          if (doc.exists) {
-            ticket = { id: doc.id, ...doc.data() };
-          }
-        } catch (e) {
-          console.error("Erro Firestore (public get ticket):", e);
-        }
-      }
-
-      if (!ticket) {
-        ticket = ticketsMemoryFallback.find(t => t.id === id) || null;
-      }
-
-      if (!ticket) {
-        return res.status(404).json({ error: "Chamado não encontrado." });
-      }
-
-      // Remove campos sensíveis antes de enviar
-      const { photos, feedbackPhoto, ...safeTicket } = ticket as any;
-      return res.json({ ticket: safeTicket });
-    } catch (err: any) {
-      console.error("Erro ao buscar chamado público:", err);
-      return res.status(500).json({ error: "Erro no servidor." });
-    }
-  });
-
-  // Comentário/observação pública do solicitante (sem login)
-  app.post("/api/tickets/public/:id/comment", async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { comment, photo } = req.body;
-
-      if (!comment || !comment.trim()) {
-        return res.status(400).json({ error: "Comentário é obrigatório." });
-      }
-
-      const smtpUserPub = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPassPub = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
-
-      let ticket = null;
-
-      if (db) {
-        try {
-          const doc = await db.collection("tickets").doc(id).get();
-          if (doc.exists) {
-            ticket = { id: doc.id, ...doc.data() };
-          }
-        } catch (e) {
-          console.error("Erro Firestore (public comment):", e);
-        }
-      }
-
-      if (!ticket) {
-        ticket = ticketsMemoryFallback.find(t => t.id === id) || null;
-      }
-
-      if (!ticket) {
-        return res.status(404).json({ error: "Chamado não encontrado." });
-      }
-
-      // Atualiza o chamado com a observação do solicitante
-      const now = new Date().toISOString();
-      const updateData: any = {
-        requesterComment: comment.trim(),
-        requesterCommentAt: now,
-      };
-      if (photo) {
-        updateData.requesterPhoto = photo;
-      }
-
-      if (db) {
-        try {
-          await db.collection("tickets").doc(id).update(updateData);
-        } catch (e) {
-          console.error("Erro Firestore (public comment update):", e);
-          return res.status(500).json({ error: "Erro ao salvar comentário." });
-        }
-      }
-
-      const idx = ticketsMemoryFallback.findIndex(t => t.id === id);
-      if (idx !== -1) {
-        ticketsMemoryFallback[idx] = { ...ticketsMemoryFallback[idx], ...updateData };
-      }
-
-      // Envia e-mail de notificação aos admins sobre nova interação do solicitante
-      const notifyAdminsAboutComment = async () => {
-        try {
-          const commentHtml = `
-            <!DOCTYPE html>
-            <html lang="pt-BR">
-            <head><meta charset="UTF-8"></head>
-            <body style="margin:0;padding:0;background-color:#f1f5f9;">
-            <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
-              <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
-                <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
-                <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">NOVA INTERAÇÃO DO SOLICITANTE</p>
-              </div>
-              <div style="padding: 28px; color: #334155;">
-                <p>O solicitante do chamado <strong>${id}</strong> adicionou uma nova observação:</p>
-                <div style="background:#f8fafc;border:1px solid #f1f5f9;border-radius:12px;padding:20px;margin:16px 0;">
-                  <p style="margin:0;color:#334155;font-style:italic;white-space:pre-wrap;">${comment.trim()}</p>
-                </div>
-                <p style="font-size:13px;color:#64748b;">Acesse o painel para responder.</p>
-              </div>
-            </div>
-            </body>
-            </html>
-          `;
-
-          await sendMailWithFallback(smtpUserPub, smtpPassPub, {
-            to: "deny.goncalves@risel.com.br",
-            from: `"Facilities Risel" <${smtpUserPub}>`,
-            subject: `[Facilities] Nova interação do solicitante — Chamado ${id}`,
-            html: commentHtml,
-          });
-
-          let adminEmails: string[] = [];
-          if (db) {
-            const snap = await db.collection("admin_users").where("active", "==", true).get();
-            snap.docs.forEach((d: any) => {
-              const e = d.data().email?.trim();
-              if (e && e !== smtpUserPub) adminEmails.push(e);
-            });
-          }
-          if (adminEmails.length === 0) {
-            adminEmails = adminUsersMemoryFallback
-              .filter(u => u.active && u.email)
-              .map(u => u.email.trim());
-          }
-
-          for (const adminEmail of adminEmails) {
-            if (adminEmail === "deny.goncalves@risel.com.br") continue;
-            await sendMailWithFallback(smtpUserPub, smtpPassPub, {
-              to: adminEmail,
-              from: `"Facilities Risel" <${smtpUserPub}>`,
-              subject: `[Facilities] Nova interação do solicitante — Chamado ${id}`,
-              html: commentHtml,
-            });
-          }
-          console.log(`E-mails de interação do solicitante enviados para admins (chamado ${id}).`);
-        } catch (emailErr) {
-          console.error("Erro ao enviar e-mails de interação do solicitante:", emailErr);
-        }
-      };
-
-      await notifyAdminsAboutComment();
-
-      return res.json({ success: true, message: "Observação registrada com sucesso!" });
-    } catch (err: any) {
-      console.error("Erro ao processar comentário público:", err);
-      return res.status(500).json({ error: "Erro no servidor." });
-    }
-  });
-
   // Endpoint da API para envio de e-mails de chamados
   app.post("/api/send-email", async (req, res) => {
     try {
@@ -1006,9 +510,8 @@ async function startServer() {
         return res.status(400).json({ error: "Dados do chamado não informados." });
       }
 
-      console.log(`[send-email] Recebido: ticket=${ticket.id}, isUpdate=${isUpdate}, to=${ticket.requesterEmail}`);
       const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
+      const smtpPass = process.env.SMTP_PASS || "@Cap150957";
 
       // Formatar data no padrão brasileiro dd/mm/aaaa hh:mm
       const formatDateBr = (dateStr: string) => {
@@ -1032,35 +535,30 @@ async function startServer() {
         : `[Risel Facilities] Chamado Registrado com Sucesso: ${ticket.id}`;
 
       // Corpo em HTML bem desenhado e profissional
-      const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
       const htmlContent = `
-        <!DOCTYPE html>
-        <html lang="pt-BR">
-        <head><meta charset="UTF-8"></head>
-        <body style="margin:0;padding:0;background-color:#f1f5f9;">
-        <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
           <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
             <h1 style="margin: 0; font-size: 22px; font-weight: 800; letter-spacing: 0.5px;">RISEL FACILITIES</h1>
-            <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;">Gest&#227;o de Manuten&#231;&#227;o Predial</p>
+            <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;">Gestão de Manutenção Predial</p>
           </div>
           
           <div style="padding: 28px; color: #334155; line-height: 1.6;">
             ${isUpdate ? `
               <div style="background-color: #f0fdf4; border-left: 4px solid #247d52; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
                 <h3 style="margin: 0 0 6px 0; color: #166534; font-size: 15px; font-weight: 800;">Status do Chamado Atualizado!</h3>
-                <p style="margin: 0; font-size: 13.5px; color: #15803d; font-weight: 500;">${updateMessage || "O status ou informa&#231;&#245;es do seu chamado de facilities foram atualizados."}</p>
+                <p style="margin: 0; font-size: 13.5px; color: #15803d; font-weight: 500;">${updateMessage || "O status ou informações do seu chamado de facilities foram atualizados."}</p>
               </div>
             ` : `
-              <p style="font-size: 15px; margin-top: 0; color: #1e293b;">Ol&#225;, <strong>${ticket.requesterName}</strong>,</p>
-              <p style="font-size: 14px; color: #475569;">Confirmamos o registro do seu chamado de manuten&#231;&#227;o preventiva/corretiva na base da Risel. Uma notifica&#231;&#227;o foi enviada ao time operacional.</p>
+              <p style="font-size: 15px; margin-top: 0; color: #1e293b;">Olá, <strong>${ticket.requesterName}</strong>,</p>
+              <p style="font-size: 14px; color: #475569;">Confirmamos o registro do seu chamado de manutenção preventiva/corretiva na base da Risel. Uma notificação foi enviada ao time operacional.</p>
             `}
 
             <div style="background-color: #f8fafc; border: 1px solid #f1f5f9; border-radius: 12px; padding: 20px; margin: 24px 0;">
-              <h2 style="margin: 0 0 14px 0; font-size: 13px; color: #1e293b; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; text-transform: uppercase; font-weight: 800; letter-spacing: 0.5px;">Especifica&#231;&#245;es da Solicita&#231;&#227;o</h2>
+              <h2 style="margin: 0 0 14px 0; font-size: 13px; color: #1e293b; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; text-transform: uppercase; font-weight: 800; letter-spacing: 0.5px;">Especificações da Solicitação</h2>
               
               <table style="width: 100%; font-size: 13px; border-collapse: collapse;">
                 <tr>
-                  <td style="padding: 8px 0; color: #64748b; font-weight: 600; width: 150px;">C&#243;digo do Chamado:</td>
+                  <td style="padding: 8px 0; color: #64748b; font-weight: 600; width: 150px;">Código do Chamado:</td>
                   <td style="padding: 8px 0; color: #247d52; font-weight: 800; font-family: monospace; font-size: 15px;">${ticket.id}</td>
                 </tr>
                 <tr>
@@ -1085,11 +583,11 @@ async function startServer() {
                 </tr>
                 <tr>
                   <td style="padding: 8px 0; color: #64748b; font-weight: 600;">Base Operacional:</td>
-                  <td style="padding: 8px 0; color: #334155; font-weight: 500;">${ticket.operationalBase || ticket.baseOperacional || "Risel"}</td>
+                  <td style="padding: 8px 0; color: #334155; font-weight: 500;">${ticket.operationalBase || "Risel"}</td>
                 </tr>
                 <tr>
                   <td style="padding: 8px 0; color: #64748b; font-weight: 600;">Setor / Local:</td>
-                  <td style="padding: 8px 0; color: #334155; font-weight: 500;">${ticket.location || "-"}</td>
+                  <td style="padding: 8px 0; color: #334155; font-weight: 500;">${ticket.location}</td>
                 </tr>
                 <tr>
                   <td style="padding: 8px 0; color: #64748b; font-weight: 600;">Data de Abertura:</td>
@@ -1104,40 +602,20 @@ async function startServer() {
                 </tr>
                 <tr>
                   <td style="padding: 10px; color: #334155; font-style: italic; background-color: #ffffff; border-radius: 8px; border: 1px dashed #cbd5e1; margin-top: 6px;" colspan="2">
-                    ${ticket.description || "Nenhum relato informado."}
+                    ${ticket.description}
                   </td>
                 </tr>
               </table>
             </div>
 
-            ${ticket.technicalNotes ? `
-            <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 12px; padding: 20px; margin: 24px 0;">
-              <h2 style="margin: 0 0 10px 0; font-size: 13px; color: #1e40af; border-bottom: 2px solid #bfdbfe; padding-bottom: 8px; text-transform: uppercase; font-weight: 800;">Notas T&#233;cnicas / Resolu&#231;&#227;o</h2>
-              <p style="margin: 0; font-size: 13px; color: #1e3a5f; white-space: pre-wrap;">${ticket.technicalNotes}</p>
-            </div>
-            ` : ""}
-
-            ${ticket.feedbackText ? `
-            <div style="background-color: #fefce8; border: 1px solid #fde68a; border-radius: 12px; padding: 20px; margin: 24px 0;">
-              <h2 style="margin: 0 0 10px 0; font-size: 13px; color: #92400e; border-bottom: 2px solid #fde68a; padding-bottom: 8px; text-transform: uppercase; font-weight: 800;">Observa&#231;&#245;es do Solicitante</h2>
-              <p style="margin: 0; font-size: 13px; color: #78350f; white-space: pre-wrap;">${ticket.feedbackText}</p>
-            </div>
-            ` : ""}
-
-            <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px; padding: 16px; margin: 24px 0; text-align: center;">
-              <p style="margin: 0 0 8px 0; font-size: 13px; color: #166534; font-weight: 700;">Acompanhe e interaja com seu chamado:</p>
-              <a href="${publicUrl}" style="display: inline-block; background-color: #247d52; color: #ffffff; padding: 10px 24px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 13px;">Acessar Chamado ${ticket.id}</a>
-              <p style="margin: 6px 0 0 0; font-size: 11px; color: #64748b; word-break: break-all;">${publicUrl}</p>
-            </div>
+            <p style="font-size: 13px; color: #64748b; margin-bottom: 24px;">Você pode rastrear a resolução e interagir diretamente por meio do canal de acompanhamento do painel utilizando o seu código.</p>
             
             <div style="text-align: center; border-top: 1px solid #f1f5f9; padding-top: 20px; margin-top: 24px;">
-              <span style="font-size: 11px; color: #94a3b8; display: block; font-weight: 500;">E-mail disparado automaticamente pelo Servi&#231;o de Facilities da Risel.</span>
+              <span style="font-size: 11px; color: #94a3b8; display: block; font-weight: 500;">E-mail disparado automaticamente pelo Serviço de Facilities da Risel.</span>
               <span style="font-size: 11px; color: #94a3b8; display: block; font-weight: 500; margin-top: 2px;">&copy; Risel Facilities. Todos os direitos reservados.</span>
             </div>
           </div>
         </div>
-        </body>
-        </html>
       `;
 
       // Coleta dinâmica de todos os e-mails de administradores ativos
@@ -1175,51 +653,29 @@ async function startServer() {
         ccList.push("deny.goncalves@risel.com.br");
       }
 
-      // Processar anexos (fotos/PDF) de forma robusta
-      const attachments: any[] = [];
+      // Processar anexos (fotos) de forma robusta
+      const attachments = [];
       if (ticket.photos && Array.isArray(ticket.photos)) {
-        for (let i = 0; i < ticket.photos.length; i++) {
-          const photo = ticket.photos[i];
+        ticket.photos.forEach((photo: string, index: number) => {
           if (photo.startsWith("data:")) {
-            const matches = photo.match(/^data:([\w\/\-\+\.]+);base64,(.+)$/);
+            const matches = photo.match(/^data:(image\/\w+);base64,(.+)$/);
             if (matches) {
               const contentType = matches[1];
-              const extMap: Record<string, string> = {
-                "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
-                "image/webp": "webp", "application/pdf": "pdf"
-              };
-              const extension = extMap[contentType] || contentType.split('/')[1] || "bin";
+              const extension = contentType.split('/')[1] || 'png';
               const base64Data = matches[2];
               attachments.push({
-                filename: `anexo_chamado_${i + 1}.${extension}`,
+                filename: `anexo_chamado_${index + 1}.${extension}`,
                 content: Buffer.from(base64Data, 'base64'),
                 contentType: contentType
               });
             }
           } else if (photo.startsWith("http")) {
-            try {
-              const fetchRes = await fetch(photo);
-              if (fetchRes.ok) {
-                const arrayBuf = await fetchRes.arrayBuffer();
-                const remoteContentType = fetchRes.headers.get("content-type") || "image/jpeg";
-                const extMap: Record<string, string> = {
-                  "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
-                  "image/webp": "webp", "application/pdf": "pdf"
-                };
-                const extension = extMap[remoteContentType] || remoteContentType.split('/')[1] || "jpg";
-                attachments.push({
-                  filename: `anexo_chamado_${i + 1}.${extension}`,
-                  content: Buffer.from(arrayBuf),
-                  contentType: remoteContentType
-                });
-              } else {
-                console.warn(`[send-email] Falha ao baixar anexo ${i + 1}: HTTP ${fetchRes.status}. Anexo ignorado.`);
-              }
-            } catch (e) {
-              console.warn(`[send-email] Erro ao baixar anexo ${i + 1}: ${e}. Anexo ignorado.`);
-            }
+            attachments.push({
+              filename: `anexo_chamado_${index + 1}.jpg`,
+              path: photo
+            });
           }
-        }
+        });
       }
 
       const mailOptions = {
@@ -1234,12 +690,12 @@ async function startServer() {
       await sendMailWithFallback(smtpUser, smtpPass, mailOptions);
       res.json({ success: true, message: "E-mail de notificação enviado com sucesso!" });
     } catch (error: any) {
-      console.error("Erro ao enviar e-mail de notificação:", error);
-      res.status(500).json({ error: "Falha ao enviar e-mail de notificação: " + (error.message || error) });
+      console.error("Erro ao enviar e-mail via SMTP Gmail:", error);
+      res.status(500).json({ error: "Falha ao enviar e-mail de notificação: " + error.message });
     }
   });
 
-  // Teste de envio de e-mail via Gmail SMTP
+  // Teste de SMTP de e-mails em tempo real
   app.post("/api/test-email", async (req, res) => {
     try {
       const { email } = req.body;
@@ -1248,20 +704,20 @@ async function startServer() {
       }
 
       const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
+      const smtpPass = process.env.SMTP_PASS || "@Cap150957";
 
       const mailOptions = {
-        from: `"Risel Facilities" <${smtpUser}>`,
+        from: `"Teste Risel" <${smtpUser}>`,
         to: email,
         subject: "[Risel Facilities] E-mail de Teste de Diagnóstico",
         html: `
           <div style="font-family: sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #cbd5e1; border-radius: 12px; padding: 24px; background-color: #f8fafc;">
-            <h2 style="color: #0f172a; margin-top: 0;">✓ Teste de e-mail bem-sucedido!</h2>
-            <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu enviar esta mensagem com sucesso.</p>
+            <h2 style="color: #0f172a; margin-top: 0;">✓ Teste de SMTP bem-sucedido!</h2>
+            <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu se autenticar com sucesso no servidor de SMTP do Gmail e enviar esta mensagem.</p>
             <div style="margin-top: 20px; padding: 12px; background-color: #f1f5f9; border-radius: 8px; font-size: 12px; color: #475569;">
               <strong>Configuração utilizada:</strong><br>
-              • Remetente: ${smtpUser}<br>
-              • Transporte: Gmail SMTP (Nodemailer)
+              • Usuário SMTP: ${smtpUser}<br>
+              • Porta: Fallback Automático 465 (SSL) / 587 (TLS)
             </div>
           </div>
         `
@@ -1270,10 +726,14 @@ async function startServer() {
       await sendMailWithFallback(smtpUser, smtpPass, mailOptions);
       return res.json({ success: true, message: "E-mail enviado com sucesso!" });
     } catch (error: any) {
-      console.error("Erro no teste de e-mail:", error);
+      console.error("Erro no teste de SMTP:", error);
+      let advice = "Dica: Verifique se o e-mail e a senha estão corretos.";
+      if (error.message.includes("535") || error.message.toLowerCase().includes("accepted")) {
+        advice = "Dica: O Gmail rejeitou as credenciais. Se você tem Verificação de Duas Etapas ativa, você DEVE gerar uma 'Senha de App' (App Password) de 16 dígitos nas configurações de Segurança da sua conta Google e usá-la no campo SMTP_PASS, em vez da sua senha de login padrão.";
+      }
       return res.status(500).json({ 
-        error: error.message || error, 
-        advice: "Dica: Verifique se as variáveis SMTP_USER e SMTP_PASS estão configuradas corretamente no Render.",
+        error: error.message, 
+        advice,
         code: error.code || "SMTP_ERROR"
       });
     }
@@ -1293,7 +753,7 @@ async function startServer() {
 
       // Caso especial: deny.goncalves@risel.com.br com a senha @Cap150957
       if (normalizedEmail === "deny.goncalves@risel.com.br" && password === "@Cap150957") {
-        const hashedPassword = await bcrypt.hash("@Cap150957", 10);
+        // Garante que o usuário existe no Firestore/memória como Admin Geral
         let denyUser: any = {
           id: "admin_deny",
           name: "Deny Gonçalves",
@@ -1302,7 +762,7 @@ async function startServer() {
           sector: "Facilities",
           active: true,
           isGeneralAdmin: true,
-          password: hashedPassword
+          password: "@Cap150957"
         };
 
         if (db) {
@@ -1315,20 +775,10 @@ async function startServer() {
         if (!adminUsersMemoryFallback.some(u => u.email === denyUser.email)) {
           adminUsersMemoryFallback.push(denyUser);
         } else {
-          adminUsersMemoryFallback = adminUsersMemoryFallback.map(u => u.email === denyUser.email ? { ...u, active: true, password: hashedPassword, isGeneralAdmin: true } : u);
+          adminUsersMemoryFallback = adminUsersMemoryFallback.map(u => u.email === denyUser.email ? { ...u, active: true, password: "@Cap150957", isGeneralAdmin: true } : u);
         }
 
-        const token = jwt.sign(
-          { id: denyUser.id, email: denyUser.email, isGeneralAdmin: true },
-          JWT_SECRET,
-          { expiresIn: "24h" }
-        );
-
-        return res.json({ 
-          success: true, 
-          token,
-          user: { name: denyUser.name, email: denyUser.email, sector: denyUser.sector, isGeneralAdmin: true } 
-        });
+        return res.json({ success: true, user: { name: denyUser.name, email: denyUser.email, sector: denyUser.sector, isGeneralAdmin: true } });
       }
 
       let user: any = null;
@@ -1354,29 +804,12 @@ async function startServer() {
         return res.status(403).json({ error: "Sua conta está inativa ou pendente de ativação por e-mail." });
       }
 
-      let isPasswordCorrect = false;
-      try {
-        isPasswordCorrect = await bcrypt.compare(password, user.password);
-      } catch (e) {
-        isPasswordCorrect = user.password === password;
-      }
-      if (!isPasswordCorrect && user.password === password) {
-        isPasswordCorrect = true;
-      }
-
-      if (!isPasswordCorrect) {
+      if (user.password !== password) {
         return res.status(401).json({ error: "Usuário ou senha incorretos." });
       }
 
-      const token = jwt.sign(
-        { id: user.id, email: user.email, isGeneralAdmin: !!user.isGeneralAdmin },
-        JWT_SECRET,
-        { expiresIn: "24h" }
-      );
-
       return res.json({
         success: true,
-        token: token,
         user: {
           id: user.id,
           name: user.name,
@@ -1392,7 +825,7 @@ async function startServer() {
   });
 
   // 2. Enviar convite de novo admin (Gera link e envia por e-mail)
-  app.post("/api/admin/invite", authenticateToken, async (req, res) => {
+  app.post("/api/admin/invite", async (req, res) => {
     try {
       const { name, email, phone, sector } = req.body;
       if (!name || !email) {
@@ -1409,13 +842,8 @@ async function startServer() {
       // Verifica se o e-mail já existe
       let alreadyExists = false;
       if (db) {
-        try {
-          const querySnapshot = await db.collection("admin_users").where("email", "==", normalizedEmail).get();
-          alreadyExists = !querySnapshot.empty;
-        } catch (dbErr: any) {
-          console.error("[invite] Erro ao buscar admin no Firestore (continuando com fallback):", dbErr.message);
-          alreadyExists = adminUsersMemoryFallback.some(u => u.email.trim().toLowerCase() === normalizedEmail);
-        }
+        const querySnapshot = await db.collection("admin_users").where("email", "==", normalizedEmail).get();
+        alreadyExists = !querySnapshot.empty;
       } else {
         alreadyExists = adminUsersMemoryFallback.some(u => u.email.trim().toLowerCase() === normalizedEmail);
       }
@@ -1441,17 +869,13 @@ async function startServer() {
       };
 
       if (db) {
-        try {
-          await db.collection("admin_users").doc(newAdmin.id).set(newAdmin);
-        } catch (dbErr: any) {
-          console.error("[invite] Erro ao salvar admin no Firestore (salvando em memória):", dbErr.message);
-        }
+        await db.collection("admin_users").doc(newAdmin.id).set(newAdmin);
       }
       adminUsersMemoryFallback.push(newAdmin);
 
       // Envia o e-mail de convite
       const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
+      const smtpPass = process.env.SMTP_PASS || "@Cap150957";
 
       const origin = req.headers.origin || "http://localhost:3000";
       const activationLink = `${origin}/?inviteToken=${inviteToken}`;
@@ -1492,14 +916,8 @@ async function startServer() {
         `
       };
 
-      let emailSent = false;
-      try {
-        await sendMailWithFallback(smtpUser, smtpPass, mailOptions);
-        emailSent = true;
-      } catch (emailErr: any) {
-        console.error("[invite] Erro ao enviar e-mail de convite (convite criado com sucesso):", emailErr.message);
-      }
-      return res.json({ success: true, message: emailSent ? "Convite enviado com sucesso!" : "Convite criado com sucesso, mas o e-mail pôde ser enviado. Compartilhe o link manualmente.", user: newAdmin, activationLink });
+      await sendMailWithFallback(smtpUser, smtpPass, mailOptions);
+      return res.json({ success: true, message: "Convite enviado com sucesso!", user: newAdmin });
     } catch (err: any) {
       console.error("Erro ao enviar convite administrativo:", err);
       return res.status(500).json({ error: "Erro interno no servidor ao processar convite: " + err.message });
@@ -1535,11 +953,10 @@ async function startServer() {
         return res.status(400).json({ error: "Este convite expirou. Entre em contato com um administrador geral para reenvio." });
       }
 
-      // Atualiza usuário com hash bcrypt
-      const hashedPassword = await bcrypt.hash(password, 10);
+      // Atualiza usuário
       const updatedUser = {
         ...user,
-        password: hashedPassword,
+        password: password,
         active: true,
         inviteToken: null,
         inviteExpires: null,
@@ -1559,8 +976,8 @@ async function startServer() {
     }
   });
 
-  // 4. Trocar a própria senha (Protegido por token)
-  app.post("/api/admin/change-password", authenticateToken, async (req, res) => {
+  // 4. Trocar a própria senha
+  app.post("/api/admin/change-password", async (req, res) => {
     try {
       const { email, oldPassword, newPassword } = req.body;
       if (!email || !oldPassword || !newPassword) {
@@ -1586,24 +1003,13 @@ async function startServer() {
         return res.status(404).json({ error: "Usuário não encontrado." });
       }
 
-      let isPasswordCorrect = false;
-      try {
-        isPasswordCorrect = await bcrypt.compare(oldPassword, user.password);
-      } catch (e) {
-        isPasswordCorrect = user.password === oldPassword;
-      }
-      if (!isPasswordCorrect && user.password === oldPassword) {
-        isPasswordCorrect = true;
-      }
-
-      if (!isPasswordCorrect) {
+      if (user.password !== oldPassword) {
         return res.status(401).json({ error: "A senha atual informada está incorreta." });
       }
 
-      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
       const updatedUser = {
         ...user,
-        password: hashedNewPassword
+        password: newPassword
       };
 
       if (db && userDocId) {
@@ -1624,7 +1030,6 @@ async function startServer() {
   const isProduction = process.env.NODE_ENV === "production" || fs.existsSync(path.join(process.cwd(), "dist"));
 
   if (!isProduction) {
-    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1638,13 +1043,9 @@ async function startServer() {
     });
   }
 
-  if (!process.env.VERCEL) {
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Servidor de e-mails e aplicação rodando com sucesso na porta ${PORT}`);
-    });
-  }
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Servidor de e-mails e aplicação rodando com sucesso na porta ${PORT}`);
+  });
 }
 
 startServer();
-
-export default app;
