@@ -609,87 +609,89 @@ async function startServer() {
       ticketsMemoryFallback = [ticket, ...ticketsMemoryFallback.filter(t => t.id !== ticket.id)];
       saveLocalDb(); // Salva na base de dados local permanentemente
 
-      // Envia e-mail notificando a abertura do novo chamado (em background)
-      const smtpUserLocal = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPassLocal = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
-      const emailTo = ticket.requesterEmail || ticket.email;
-      if (emailTo && smtpPassLocal) {
-        // Monta lista de CC com administradores ativos
-        let activeAdminEmails: string[] = [];
-        if (db) {
-          try {
-            const adminsSnapshot = await db.collection("admin_users").where("active", "==", true).get();
-            adminsSnapshot.docs.forEach((doc: any) => {
-              const adminData = doc.data();
-              if (adminData.email) activeAdminEmails.push(adminData.email.trim());
-            });
-          } catch (e) {
-            console.error("Erro ao buscar administradores ativos do Firestore:", e);
-          }
-        }
-        if (activeAdminEmails.length === 0) {
-          activeAdminEmails = adminUsersMemoryFallback
-            .filter(u => u.active && u.email)
-            .map(u => u.email.trim());
-        }
-        const ccList: string[] = [];
-        activeAdminEmails.forEach(email => {
-          const normalized = email.trim().toLowerCase();
-          const normalizedSmtp = smtpUserLocal.trim().toLowerCase();
-          if (normalized !== normalizedSmtp && normalized !== "facilitiesrisel@gmail.com" && !ccList.includes(email)) {
-            ccList.push(email);
-          }
-        });
-        if (!ccList.includes("deny.goncalves@risel.com.br") && smtpUserLocal.trim().toLowerCase() !== "deny.goncalves@risel.com.br") {
-          ccList.push("deny.goncalves@risel.com.br");
-        }
+      // Envio de e-mail em background — NADA AQUI TRAVA A RESPOSTA
+      (async () => {
+        const smtpUserLocal = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
+        const smtpPassLocal = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
+        const emailTo = ticket.requesterEmail || ticket.email;
+        if (!emailTo || !smtpPassLocal) return;
 
-        const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
-        const newTicketHtml = `
-          <!DOCTYPE html>
-          <html lang="pt-BR">
-          <head><meta charset="UTF-8"></head>
-          <body style="margin:0;padding:0;background-color:#f1f5f9;">
-          <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
-            <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
-              <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
-              <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">CHAMADO ABERTO COM SUCESSO</p>
-            </div>
-            <div style="padding: 28px; color: #334155;">
-              <p style="font-size:15px;">Olá, <strong>${ticket.requesterName || "Solicitante"}</strong>,</p>
-              <p style="font-size:14px;color:#475569;">Seu chamado foi registrado com sucesso e será analisado em breve.</p>
-              <div style="background:#f0fdf4;border-left:4px solid #247d52;padding:16px;border-radius:8px;margin:16px 0;">
-                <p style="margin:0;font-size:13px;color:#15803d;">
-                  <strong>Protocolo:</strong> ${ticket.id}<br>
-                  <strong>Status:</strong> ${ticket.status}<br>
-                  <strong>Item:</strong> ${ticket.maintenanceItem || ticket.title || "—"}
-                </p>
-              </div>
-              <div style="text-align:center;margin:20px 0;">
-                <a href="${publicUrl}" style="display:inline-block;background-color:#247d52;color:#ffffff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;">Acompanhar Chamado</a>
-              </div>
-            </div>
-          </div>
-          </body>
-          </html>
-        `;
-        const mailOptions: any = {
-          to: emailTo,
-          from: `"Facilities Risel" <${smtpUserLocal}>`,
-          subject: `[Facilities] Novo Chamado Aberto — ${ticket.id}`,
-          html: newTicketHtml,
-        };
-        if (ccList.length > 0) {
-          mailOptions.cc = ccList.join(", ");
-        }
-        sendMailWithFallback(smtpUserLocal, smtpPassLocal, mailOptions)
-          .then(() => {
-            console.log(`E-mail de novo chamado enviado para ${emailTo} CC: ${ccList.join(", ") || "nenhum"} (chamado ${ticket.id}).`);
-          })
-          .catch((emailErr: any) => {
-            console.error(`[SMTP] Falha ao enviar e-mail do chamado ${ticket.id}:`, emailErr.message || emailErr);
+        try {
+          let activeAdminEmails: string[] = [];
+          if (db) {
+            try {
+              const adminsSnapshot = await Promise.race([
+                db.collection("admin_users").where("active", "==", true).get(),
+                new Promise<any>((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000))
+              ]);
+              adminsSnapshot.docs.forEach((doc: any) => {
+                const adminData = doc.data();
+                if (adminData.email) activeAdminEmails.push(adminData.email.trim());
+              });
+            } catch (e) {
+              console.warn("[email] Erro ao buscar admins no Firestore:", (e as any)?.message || e);
+            }
+          }
+          if (activeAdminEmails.length === 0) {
+            activeAdminEmails = adminUsersMemoryFallback
+              .filter(u => u.active && u.email)
+              .map(u => u.email.trim());
+          }
+          const ccList: string[] = [];
+          activeAdminEmails.forEach(email => {
+            const normalized = email.trim().toLowerCase();
+            const normalizedSmtp = smtpUserLocal.trim().toLowerCase();
+            if (normalized !== normalizedSmtp && normalized !== "facilitiesrisel@gmail.com" && !ccList.includes(email)) {
+              ccList.push(email);
+            }
           });
-      }
+          if (!ccList.includes("deny.goncalves@risel.com.br") && smtpUserLocal.trim().toLowerCase() !== "deny.goncalves@risel.com.br") {
+            ccList.push("deny.goncalves@risel.com.br");
+          }
+
+          const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
+          const newTicketHtml = `
+            <!DOCTYPE html>
+            <html lang="pt-BR">
+            <head><meta charset="UTF-8"></head>
+            <body style="margin:0;padding:0;background-color:#f1f5f9;">
+            <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
+              <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
+                <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
+                <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">CHAMADO ABERTO COM SUCESSO</p>
+              </div>
+              <div style="padding: 28px; color: #334155;">
+                <p style="font-size:15px;">Olá, <strong>${ticket.requesterName || "Solicitante"}</strong>,</p>
+                <p style="font-size:14px;color:#475569;">Seu chamado foi registrado com sucesso e será analisado em breve.</p>
+                <div style="background:#f0fdf4;border-left:4px solid #247d52;padding:16px;border-radius:8px;margin:16px 0;">
+                  <p style="margin:0;font-size:13px;color:#15803d;">
+                    <strong>Protocolo:</strong> ${ticket.id}<br>
+                    <strong>Status:</strong> ${ticket.status}<br>
+                    <strong>Item:</strong> ${ticket.maintenanceItem || ticket.title || "—"}
+                  </p>
+                </div>
+                <div style="text-align:center;margin:20px 0;">
+                  <a href="${publicUrl}" style="display:inline-block;background-color:#247d52;color:#ffffff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;">Acompanhar Chamado</a>
+                </div>
+              </div>
+            </div>
+            </body>
+            </html>
+          `;
+          const mailOptions: any = {
+            to: emailTo,
+            from: `"Facilities Risel" <${smtpUserLocal}>`,
+            subject: `[Facilities] Novo Chamado Aberto — ${ticket.id}`,
+            html: newTicketHtml,
+          };
+          if (ccList.length > 0) mailOptions.cc = ccList.join(", ");
+
+          await sendMailWithFallback(smtpUserLocal, smtpPassLocal, mailOptions);
+          console.log(`E-mail de novo chamado enviado para ${emailTo} CC: ${ccList.join(", ") || "nenhum"} (chamado ${ticket.id}).`);
+        } catch (emailErr: any) {
+          console.error(`[email] Falha ao enviar e-mail do chamado ${ticket.id}:`, emailErr.message || emailErr);
+        }
+      })();
 
       if (db) {
         try {
