@@ -101,6 +101,8 @@ try {
     db = getFirestore(app, databaseId || undefined);
     isFirebaseConfigured = true;
     console.log(`Firebase Firestore inicializado com sucesso! Project ID: ${projectId}, ID do Banco: ${databaseId || "(default)"}${parsedCredentials ? " (Utilizando Service Account)" : ""}`);
+
+    // Health check do Firestore bloqueia o startup (feito dentro do startServer)
   } else {
     console.warn("Nenhuma configuração do Firebase encontrada (arquivo ou variáveis de ambiente). Utilizando armazenamento em memória de fallback.");
   }
@@ -1729,6 +1731,21 @@ async function startServer() {
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
+  }
+
+  // Health check do Firestore — bloqueia startup se falhar
+  if (db) {
+    try {
+      await Promise.race([
+        db.collection("_health_check").limit(1).get(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000))
+      ]);
+      console.log("[Firestore] Health check OK — banco operacional.");
+    } catch (e: any) {
+      console.warn(`[Firestore] Health check falhou (${e.message || e}). Desativando, usando armazenamento local.`);
+      db = null;
+      isFirebaseConfigured = false;
+    }
   }
 
   if (!process.env.VERCEL) {
