@@ -146,8 +146,10 @@ let smtpTransporter: nodemailer.Transporter | null = null;
 
 function getSmtpTransporter(): nodemailer.Transporter {
   if (!smtpTransporter) {
-    const user = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-    const pass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
+    let user = (process.env.SMTP_USER || "facilitiesrisel@gmail.com").trim();
+    let pass = (process.env.SMTP_PASS || "rzmvbnvjpuceyarj").trim();
+    if (pass.startsWith('"') && pass.endsWith('"')) pass = pass.slice(1, -1);
+    if (pass.startsWith("'") && pass.endsWith("'")) pass = pass.slice(1, -1);
     if (!pass) {
       throw new Error("SMTP_PASS não configurada. Cadastre a variável de ambiente SMTP_PASS no Render.");
     }
@@ -575,54 +577,86 @@ async function startServer() {
       ticketsMemoryFallback = [ticket, ...ticketsMemoryFallback.filter(t => t.id !== ticket.id)];
       saveLocalDb(); // Salva na base de dados local permanentemente
 
-      // Envia e-mail notificando a abertura do novo chamado
-      try {
-        const smtpUserLocal = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-        const smtpPassLocal = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
-        const emailTo = ticket.requesterEmail || ticket.email;
-        if (emailTo && smtpPassLocal) {
-          const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
-          const newTicketHtml = `
-            <!DOCTYPE html>
-            <html lang="pt-BR">
-            <head><meta charset="UTF-8"></head>
-            <body style="margin:0;padding:0;background-color:#f1f5f9;">
-            <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
-              <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
-                <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
-                <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">CHAMADO ABERTO COM SUCESSO</p>
+      // Envia e-mail notificando a abertura do novo chamado (em background)
+      const smtpUserLocal = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
+      const smtpPassLocal = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
+      const emailTo = ticket.requesterEmail || ticket.email;
+      if (emailTo && smtpPassLocal) {
+        // Monta lista de CC com administradores ativos
+        let activeAdminEmails: string[] = [];
+        if (db) {
+          try {
+            const adminsSnapshot = await db.collection("admin_users").where("active", "==", true).get();
+            adminsSnapshot.docs.forEach((doc: any) => {
+              const adminData = doc.data();
+              if (adminData.email) activeAdminEmails.push(adminData.email.trim());
+            });
+          } catch (e) {
+            console.error("Erro ao buscar administradores ativos do Firestore:", e);
+          }
+        }
+        if (activeAdminEmails.length === 0) {
+          activeAdminEmails = adminUsersMemoryFallback
+            .filter(u => u.active && u.email)
+            .map(u => u.email.trim());
+        }
+        const ccList: string[] = [];
+        activeAdminEmails.forEach(email => {
+          const normalized = email.trim().toLowerCase();
+          const normalizedSmtp = smtpUserLocal.trim().toLowerCase();
+          if (normalized !== normalizedSmtp && normalized !== "facilitiesrisel@gmail.com" && !ccList.includes(email)) {
+            ccList.push(email);
+          }
+        });
+        if (!ccList.includes("deny.goncalves@risel.com.br") && smtpUserLocal.trim().toLowerCase() !== "deny.goncalves@risel.com.br") {
+          ccList.push("deny.goncalves@risel.com.br");
+        }
+
+        const publicUrl = `https://facilities-risel.onrender.com/chamado/${ticket.id}`;
+        const newTicketHtml = `
+          <!DOCTYPE html>
+          <html lang="pt-BR">
+          <head><meta charset="UTF-8"></head>
+          <body style="margin:0;padding:0;background-color:#f1f5f9;">
+          <div style="font-family: Arial, Helvetica, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background-color: #ffffff;">
+            <div style="background-color: #1e293b; padding: 24px; text-align: center; color: #ffffff;">
+              <h1 style="margin: 0; font-size: 22px;">RISEL FACILITIES</h1>
+              <p style="margin: 6px 0 0 0; font-size: 12px; color: #247d52; font-weight: 700;">CHAMADO ABERTO COM SUCESSO</p>
+            </div>
+            <div style="padding: 28px; color: #334155;">
+              <p style="font-size:15px;">Olá, <strong>${ticket.requesterName || "Solicitante"}</strong>,</p>
+              <p style="font-size:14px;color:#475569;">Seu chamado foi registrado com sucesso e será analisado em breve.</p>
+              <div style="background:#f0fdf4;border-left:4px solid #247d52;padding:16px;border-radius:8px;margin:16px 0;">
+                <p style="margin:0;font-size:13px;color:#15803d;">
+                  <strong>Protocolo:</strong> ${ticket.id}<br>
+                  <strong>Status:</strong> ${ticket.status}<br>
+                  <strong>Item:</strong> ${ticket.maintenanceItem || ticket.title || "—"}
+                </p>
               </div>
-              <div style="padding: 28px; color: #334155;">
-                <p style="font-size:15px;">Olá, <strong>${ticket.requesterName || "Solicitante"}</strong>,</p>
-                <p style="font-size:14px;color:#475569;">Seu chamado foi registrado com sucesso e será analisado em breve.</p>
-                <div style="background:#f0fdf4;border-left:4px solid #247d52;padding:16px;border-radius:8px;margin:16px 0;">
-                  <p style="margin:0;font-size:13px;color:#15803d;">
-                    <strong>Protocolo:</strong> ${ticket.id}<br>
-                    <strong>Status:</strong> ${ticket.status}<br>
-                    <strong>Item:</strong> ${ticket.maintenanceItem || ticket.title || "—"}
-                  </p>
-                </div>
-                <div style="text-align:center;margin:20px 0;">
-                  <a href="${publicUrl}" style="display:inline-block;background-color:#247d52;color:#ffffff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;">Acompanhar Chamado</a>
-                </div>
+              <div style="text-align:center;margin:20px 0;">
+                <a href="${publicUrl}" style="display:inline-block;background-color:#247d52;color:#ffffff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;">Acompanhar Chamado</a>
               </div>
             </div>
-            </body>
-            </html>
-          `;
-          sendMailWithFallback(smtpUserLocal, smtpPassLocal, {
-            to: emailTo,
-            from: `"Facilities Risel" <${smtpUserLocal}>`,
-            subject: `[Facilities] Novo Chamado Aberto — ${ticket.id}`,
-            html: newTicketHtml,
-          }).then(() => {
-            console.log(`E-mail de novo chamado enviado para ${emailTo} (chamado ${ticket.id}).`);
-          }).catch((emailErr: any) => {
-            console.error("Erro ao enviar e-mail de novo chamado:", emailErr);
-          });
+          </div>
+          </body>
+          </html>
+        `;
+        const mailOptions: any = {
+          to: emailTo,
+          from: `"Facilities Risel" <${smtpUserLocal}>`,
+          subject: `[Facilities] Novo Chamado Aberto — ${ticket.id}`,
+          html: newTicketHtml,
+        };
+        if (ccList.length > 0) {
+          mailOptions.cc = ccList.join(", ");
         }
-      } catch (emailErr) {
-        console.error("Erro ao enviar e-mail de novo chamado:", emailErr);
+        sendMailWithFallback(smtpUserLocal, smtpPassLocal, mailOptions)
+          .then(() => {
+            console.log(`E-mail de novo chamado enviado para ${emailTo} CC: ${ccList.join(", ") || "nenhum"} (chamado ${ticket.id}).`);
+          })
+          .catch((emailErr: any) => {
+            console.error(`[SMTP] Falha ao enviar e-mail do chamado ${ticket.id}:`, emailErr.message || emailErr);
+          });
       }
 
       if (db) {
@@ -1248,40 +1282,45 @@ async function startServer() {
 
   // Teste de envio de e-mail via Gmail SMTP
   app.post("/api/test-email", async (req, res) => {
-    try {
-      const { email } = req.body;
-      if (!email) {
-        return res.status(400).json({ error: "E-mail de teste de destino não informado." });
-      }
+    const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
+    const smtpPass = (process.env.SMTP_PASS || "rzmvbnvjpuceyarj").replace(/^["']|["']$/g, "");
 
-      const smtpUser = process.env.SMTP_USER || "facilitiesrisel@gmail.com";
-      const smtpPass = process.env.SMTP_PASS || "rzmvbnvjpuceyarj";
+    const { email } = req.body;
+    const sendTo = email || smtpUser;
 
-      const mailOptions = {
-        from: `"Risel Facilities" <${smtpUser}>`,
-        to: email,
-        subject: "[Risel Facilities] E-mail de Teste de Diagnóstico",
-        html: `
-          <div style="font-family: sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #cbd5e1; border-radius: 12px; padding: 24px; background-color: #f8fafc;">
-            <h2 style="color: #0f172a; margin-top: 0;">✓ Teste de e-mail bem-sucedido!</h2>
-            <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu enviar esta mensagem com sucesso.</p>
-            <div style="margin-top: 20px; padding: 12px; background-color: #f1f5f9; border-radius: 8px; font-size: 12px; color: #475569;">
-              <strong>Configuração utilizada:</strong><br>
-              • Remetente: ${smtpUser}<br>
-              • Transporte: Gmail SMTP (Nodemailer)
-            </div>
+    const mailOptions = {
+      from: `"Risel Facilities" <${smtpUser}>`,
+      to: sendTo,
+      subject: "[Risel Facilities] E-mail de Teste de Diagnóstico",
+      html: `
+        <div style="font-family: sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #cbd5e1; border-radius: 12px; padding: 24px; background-color: #f8fafc;">
+          <h2 style="color: #0f172a; margin-top: 0;">✓ Teste de e-mail bem-sucedido!</h2>
+          <p style="color: #334155; font-size: 14px; line-height: 1.5;">O seu servidor configurado no Render conseguiu enviar esta mensagem com sucesso.</p>
+          <div style="margin-top: 20px; padding: 12px; background-color: #f1f5f9; border-radius: 8px; font-size: 12px; color: #475569;">
+            <strong>Configuração utilizada:</strong><br>
+            • Remetente: ${smtpUser}<br>
+            • Transporte: Gmail SMTP (Nodemailer)
           </div>
-        `
-      };
+        </div>
+      `
+    };
 
-      await sendMailWithFallback(smtpUser, smtpPass, mailOptions);
+    try {
+      const result = await Promise.race([
+        sendMailWithFallback(smtpUser, smtpPass, mailOptions),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout após 15 segundos")), 15000))
+      ]);
       return res.json({ success: true, message: "E-mail enviado com sucesso!" });
     } catch (error: any) {
       console.error("Erro no teste de e-mail:", error);
-      return res.status(500).json({ 
-        error: error.message || error, 
-        advice: "Dica: Verifique se as variáveis SMTP_USER e SMTP_PASS estão configuradas corretamente no Render.",
-        code: error.code || "SMTP_ERROR"
+      const advice = error.code === "EAUTH"
+        ? "Falha de autenticação. Verifique se a senha do SMTP_PASS está correta. Se for App Password do Gmail, gere uma nova em https://myaccount.google.com/apppasswords"
+        : "Verifique se as variáveis SMTP_USER e SMTP_PASS estão configuradas corretamente no Render.";
+      return res.status(500).json({
+        error: error.message || String(error),
+        code: error.code || "SMTP_ERROR",
+        advice,
+        config: { smtpUser, smtpPassDefined: !!smtpPass, smtpPassLength: smtpPass?.length }
       });
     }
   });
